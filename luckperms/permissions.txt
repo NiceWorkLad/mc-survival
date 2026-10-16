@@ -1,0 +1,23 @@
+# LuckPerms permissions, exported from game-server by pc/mc-pull-live.
+# Read-only record for history: change permissions in game with /lp, not here.
+
+## Groups
+group admin: * = true
+group admin: group.default = true
+group admin: worldguard.region.bypass.world = false
+group admin: worldguard.region.bypass.world_nether = false
+group admin: worldguard.region.bypass.world_the_end = false
+group default: essentials.back = true
+group default: essentials.back.ondeath = true
+group default: essentials.delhome = true
+group default: essentials.home = true
+group default: essentials.sethome = true
+group default: essentials.spawn = true
+group default: essentials.tpa = true
+group default: essentials.tpacancel = true
+group default: essentials.tpaccept = true
+group default: essentials.tpdeny = true
+
+## Players
+player niceworklad: group.admin = true
+player niceworklad: group.default = true
