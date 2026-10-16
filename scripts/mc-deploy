@@ -1,0 +1,134 @@
+#!/bin/bash
+# Deploy config from the git repo to the live server.
+#   sudo mc-deploy            pull, show changes, ask, apply, offer restart
+#   sudo mc-deploy --check    pull and show differences only (exit 1 if any)
+#   sudo mc-deploy --yes      apply without asking (restart still asks)
+# Never deletes files on the server; only adds or overwrites.
+set -euo pipefail
+
+REPO=/home/niceworklad/mc-survival
+LIVE=/opt/minecraft/survival
+SECRETS=/opt/minecraft/secrets.env
+FIFO=/run/minecraft-survival.stdin
+SERVICE=minecraft-survival
+
+CHECK=0; YES=0
+for a in "$@"; do
+  case "$a" in
+    --check) CHECK=1 ;;
+    --yes) YES=1 ;;
+    *) echo "usage: mc-deploy [--check] [--yes]"; exit 2 ;;
+  esac
+done
+[ "$(id -u)" -eq 0 ] || { echo "run with sudo"; exit 2; }
+
+# Hide secret values in anything printed
+mask() {
+  perl -pe 'BEGIN{@s=grep{length($_)>3}map{$ENV{$_}//""}split(" ",$ENV{MASK_KEYS}//"");
+                  @k=split(" ",$ENV{MASK_SETTINGS}//"")}
+            for my $v(@s){s/\Q$v\E/********/g}
+            for my $k(@k){s/^([-+ ]\Q$k\E[=:] *).*/$1********/}'
+}
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+ask() { [ "$YES" -eq 1 ] && return 0; read -r -p "$1 [y/N] " r; [[ "$r" =~ ^[Yy] ]]; }
+
+# --- 1. Pull (as the repo owner, who holds the read-only deploy key)
+owner=$(stat -c %U "$REPO")
+sudo -u "$owner" git -C "$REPO" pull --ff-only --quiet
+bold "Repo at $(sudo -u "$owner" git -C "$REPO" log --oneline -1)"
+
+# --- 2. Secrets: create any listed in secrets.env.example that are missing
+touch "$SECRETS"; chmod 600 "$SECRETS"; chown root:root "$SECRETS"
+while IFS= read -r key; do
+  grep -q "^$key=" "$SECRETS" || { echo "$key=$(openssl rand -hex 20)" >> "$SECRETS"; echo "generated secret $key"; }
+done < <(sed -nE 's/^([A-Z_]+)=.*/\1/p' "$REPO/secrets.env.example")
+set -a; . "$SECRETS"; set +a
+export MASK_KEYS="$(cut -d= -f1 "$SECRETS" | tr '\n' ' ')"
+# Settings whose values are secrets, e.g. "rcon.password" (masked whatever their value)
+export MASK_SETTINGS="$(grep -rhoE '^[A-Za-z0-9_.-]+[=:] *\$\{[A-Z_]+\}' "$REPO/server" "$REPO/plugins" | sed -E 's/[=:].*//' | sort -u | tr '\n' ' ')"
+
+# --- 3. Render repo files into a staging dir with secrets substituted
+STAGE=$(mktemp -d); trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/live/plugins" "$STAGE/systemd" "$STAGE/bin"
+cp -r "$REPO/server/." "$STAGE/live/"
+cp -r "$REPO/plugins/." "$STAGE/live/plugins/"
+cp -r "$REPO/systemd/." "$STAGE/systemd/"
+for f in "$REPO"/scripts/mc-*; do cp "$f" "$STAGE/bin/"; done
+{ grep -rlE '\$\{[A-Z_]+\}' "$STAGE" || true; } | xargs -r perl -pi -e 's/\$\{([A-Z_]+)\}/exists $ENV{$1} ? $ENV{$1} : $&/ge'
+if left=$(grep -rnoE '\$\{[A-Z_]+\}' "$STAGE"); then
+  echo "Unfilled placeholders (add them to $SECRETS):"; echo "$left" | sed "s|$STAGE/||"; exit 1
+fi
+
+# --- 4. Work out what differs
+changed=()
+# Compare ignoring the "#Fri Oct 16 11:11:40 UTC 2026" line Minecraft rewrites on every start
+same() { cmp -s <(sed -E '/^#[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9]{2} /d' "$1") <(sed -E '/^#[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9]{2} /d' "$2"); }
+compare() { # $1=staged root  $2=live root  $3=label
+  while IFS= read -r rel; do
+    if [ ! -e "$2/$rel" ] || ! same "$1/$rel" "$2/$rel"; then changed+=("$3|$rel"); fi
+  done < <(cd "$1" && find . -type f | sed 's|^\./||' | sort)
+}
+compare "$STAGE/live" "$LIVE" live
+compare "$STAGE/systemd" /etc/systemd/system systemd
+compare "$STAGE/bin" /usr/local/bin bin
+
+dest() { case "$1" in live) echo "$LIVE";; systemd) echo /etc/systemd/system;; bin) echo /usr/local/bin;; esac; }
+
+if [ ${#changed[@]} -eq 0 ]; then bold "Server already matches the repo."; exit 0; fi
+
+bold "${#changed[@]} file(s) differ from the server:"
+for c in "${changed[@]}"; do
+  kind=${c%%|*}; rel=${c#*|}; d=$(dest "$kind")
+  echo; bold "── $d/$rel"
+  if [ -e "$d/$rel" ]; then
+    diff -u "$d/$rel" "$STAGE/$kind/$rel" | tail -n +3 | mask || true
+  else
+    echo "(new file)"
+  fi
+done
+echo
+
+if [ "$CHECK" -eq 1 ]; then exit 1; fi
+ask "Apply these changes?" || { echo "Nothing changed."; exit 0; }
+
+# --- 5. Apply
+need_restart=0; need_reload_units=0; bluemap_only=1
+for c in "${changed[@]}"; do
+  kind=${c%%|*}; rel=${c#*|}; d=$(dest "$kind")
+  case "$kind" in
+    live)
+      install -D -o minecraft -g minecraft -m 644 "$STAGE/live/$rel" "$d/$rel"
+      need_restart=1
+      [[ "$rel" == plugins/BlueMap/* ]] || bluemap_only=0 ;;
+    systemd)
+      install -D -m 644 "$STAGE/systemd/$rel" "$d/$rel"; need_reload_units=1; bluemap_only=0 ;;
+    bin)
+      install -m 755 "$STAGE/bin/$rel" "$d/$rel"; bluemap_only=0 ;;
+  esac
+  echo "updated $d/$rel"
+done
+[ "$need_reload_units" -eq 1 ] && systemctl daemon-reload && echo "systemd reloaded"
+
+# --- 6. Restart if needed
+[ "$need_restart" -eq 1 ] || { bold "Done. No restart needed."; exit 0; }
+if [ "$bluemap_only" -eq 1 ]; then
+  bold "Done. Only BlueMap changed: run /bluemap reload in game (no restart needed)."; exit 0
+fi
+
+online=0
+if systemctl is-active --quiet "$SERVICE"; then
+  since=$(date '+%F %T'); echo "list" > "$FIFO"; sleep 2
+  online=$(journalctl -u "$SERVICE" --since "$since" -q --no-pager | grep -oE 'There are [0-9]+' | grep -oE '[0-9]+' | tail -1)
+  online=${online:-0}
+fi
+bold "Config changed. The server needs a restart to pick it up ($online player(s) online)."
+read -r -p "Restart now? [y/N] " r
+if [[ "$r" =~ ^[Yy] ]]; then
+  if [ "$online" -gt 0 ]; then
+    echo "say Server restarting in 60 seconds to apply updates" > "$FIFO"; sleep 50
+    echo "say Restarting in 10 seconds..." > "$FIFO"; sleep 10
+  fi
+  systemctl restart "$SERVICE"; bold "Restarted."
+else
+  echo "Not restarted. Changes take effect at the next restart: sudo systemctl restart $SERVICE"
+fi

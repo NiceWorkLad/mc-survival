@@ -23,8 +23,16 @@ Server lives in `/opt/minecraft/survival`, runs as the `minecraft` user under sy
 
 ## Changing config
 
-Edit here, commit, push. Deploying to the server is manual for now (copy the file over and restart);
-an `mc-deploy` script that pulls, substitutes secrets and restarts is planned.
+1. Edit here (or on GitHub), commit, push.
+2. On the server: `sudo mc-deploy`. It pulls the repo into `~/mc-survival` (read-only deploy key),
+   fills `${VAR}` placeholders from `/opt/minecraft/secrets.env`, shows a diff, asks, then installs:
+   `server/` and `plugins/` into the server dir, `systemd/` into `/etc/systemd/system`, `scripts/mc-*`
+   into `/usr/local/bin`. It never deletes files on the server.
+3. If a restart is needed it says so, checks who's online, and warns players in chat 60s before.
+   BlueMap-only changes just need `/bluemap reload` in game.
+
+`sudo mc-deploy --check` shows differences without changing anything (exit 1 if there are any).
+Missing secrets listed in `secrets.env.example` are generated automatically on first run.
 
 Plugins rewrite their own configs on startup (adding comments, new defaults), so expect small diffs
 when re-syncing from the live server.
