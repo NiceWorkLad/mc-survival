@@ -1,0 +1,16 @@
+[Unit]
+Description=Minecraft Paper Survival Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=minecraft
+Group=minecraft
+WorkingDirectory=/opt/minecraft/survival
+ExecStart=/usr/bin/java -Xms2G -Xmx4G -jar /opt/minecraft/survival/paper.jar --nogui
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

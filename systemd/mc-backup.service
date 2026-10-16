@@ -1,0 +1,6 @@
+[Unit]
+Description=Backup Minecraft survival server
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mc-backup

@@ -1,0 +1,34 @@
+# Secrets
+secrets.env
+*.pem
+*.key
+
+# Jars (pinned in plugins.txt instead)
+*.jar
+*.jar.disabled
+
+# Runtime data: lives in backups, not git
+world*/
+logs/
+cache/
+libraries/
+versions/
+bluemap/
+*.db
+*.mv.db
+*.sqlite
+usercache.json
+ops.json
+whitelist.json
+banned-*.json
+plugins/*/userdata/
+plugins/GriefPreventionData/ClaimData/
+plugins/GriefPreventionData/PlayerData/
+plugins/GriefPreventionData/Logs/
+plugins/WorldGuard/worlds/*/regions.yml
+plugins/spark/tmp/
+plugins/TAB/playerdata.yml
+plugins/TAB/skincache.yml
+plugins/TAB/users.yml
+plugins/Essentials/items.json
+plugins/Essentials/upgrades-done.yml

@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+
+SRC=/opt/minecraft/survival
+DEST=/var/backups/minecraft
+KEEP=7
+FIFO=/run/minecraft-survival.stdin
+
+mkdir -p "$DEST"
+ts=$(date +%F-%H%M)
+out="$DEST/survival-$ts.tgz"
+paused=0
+
+send() { echo "$*" > "$FIFO"; }
+
+cleanup() {
+  if [ "$paused" -eq 1 ]; then send "save-on"; fi
+}
+trap cleanup EXIT
+
+if systemctl is-active --quiet minecraft-survival; then
+  paused=1
+  send "save-off"
+  send "save-all flush"
+  sleep 15
+fi
+
+rc=0
+tar czf "$out" -C "$SRC" \
+  world plugins config \
+  server.properties ops.json whitelist.json banned-players.json banned-ips.json \
+  bukkit.yml spigot.yml commands.yml wepif.yml \
+  || rc=$?
+# tar exits 1 when a file changed while reading; that's tolerable, anything higher is not
+[ "$rc" -le 1 ] || { echo "tar failed with code $rc"; rm -f "$out"; exit 1; }
+
+tar tzf "$out" >/dev/null   # integrity check
+
+ls -1t "$DEST"/survival-*.tgz | tail -n +$((KEEP + 1)) | xargs -r rm --
+echo "Backup complete: $out ($(du -h "$out" | cut -f1))"
