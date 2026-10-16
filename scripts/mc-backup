@@ -58,3 +58,8 @@ chmod -R g+rX "$RESTIC_REPOSITORY"
 chmod g+w "$RESTIC_REPOSITORY/locks"
 
 restic snapshots --latest 1 --compact
+
+# Player world download from the same snapshot; a failure here must not fail the backup
+if [ -x /usr/local/bin/mc-worldzip ]; then
+  /usr/local/bin/mc-worldzip || echo "WARNING: world download build failed"
+fi

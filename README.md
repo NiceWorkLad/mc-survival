@@ -62,3 +62,11 @@ Restore a snapshot (PC example):
 - `pc/mc-pull-live --configs`: copies live config files over the working tree (secrets stay as
   placeholders) so you can `git diff` what changed on the server, e.g. plugins rewriting their configs
   or edits made in game. Nothing is committed automatically.
+
+## Web: map + world download (port 8100)
+
+Caddy (`caddy/Caddyfile`, deployed to `/etc/caddy/` by `mc-deploy`) owns the public port 8100:
+- `/world/`: nightly world download (`scripts/mc-worldzip`, run at the end of `mc-backup` from the
+  same snapshot). Overworld + Nether + level.dat + map data; no player data, no End. Published
+  atomically to `/var/www/world/`.
+- everything else: reverse-proxied to BlueMap on `127.0.0.1:8101`.

@@ -1,0 +1,85 @@
+#!/bin/bash
+# Build the player world download from the backup's staged copy and publish it
+# to /var/www/world (served by Caddy at http://<server>:8100/world/).
+# Called at the end of mc-backup, so the copy is the same consistent snapshot.
+# Contents: level.dat, data/, datapacks/, overworld and nether. No player data, no End.
+set -euo pipefail
+
+STAGE=/var/lib/mc-backup/stage
+OUT=/var/www/world
+TITLE="NiceWorkLad Survival"
+ZIP=survival-world.zip
+
+[ -f "$STAGE/world/level.dat" ] || { echo "no staged world at $STAGE/world"; exit 1; }
+install -d -m 755 "$OUT"
+
+work=$(mktemp -d /var/tmp/mc-worldzip.XXXXXX); trap 'rm -rf "$work"' EXIT
+# The zip holds one top-level folder, so it extracts straight into .minecraft/saves
+python3 - "$STAGE/world" "$work/$ZIP" "$TITLE" <<'PY'
+import os, sys, zipfile
+src, out, title = sys.argv[1:]
+skip_dirs = {"players", os.path.join("dimensions", "minecraft", "the_end")}
+skip_files = {"session.lock", "level.dat_old"}
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+    for root, dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        dirs[:] = sorted(d for d in dirs if os.path.normpath(os.path.join(rel, d)) not in skip_dirs)
+        for f in sorted(files):
+            if rel == "." and f in skip_files:
+                continue
+            z.write(os.path.join(root, f), os.path.join(title, rel, f) if rel != "." else os.path.join(title, f))
+PY
+
+version=$(grep -oE '"currentVersion": *"[^"]+"' "$STAGE/.paper/version_history.json" 2>/dev/null \
+          | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)
+size=$(du -h "$work/$ZIP" | cut -f1)
+sum=$(sha256sum "$work/$ZIP" | cut -d' ' -f1)
+built=$(date -u -r "$STAGE/world/level.dat" '+%Y-%m-%d %H:%M UTC')  # when the snapshot was taken
+
+cat > "$work/index.html" <<HTML
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$TITLE · World download</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f5f2; --fg:#1d1d1b; --muted:#6b6a65; --card:#fff; --line:#e3e1db; --accent:#3b7d3a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#171716; --fg:#ecebe7; --muted:#a09e97; --card:#21211f; --line:#33322f; --accent:#7cc47a; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.55 system-ui, sans-serif; }
+  main { max-width:40rem; margin:0 auto; padding:3rem 1.25rem; }
+  h1 { font-size:1.6rem; margin:0 0 .25rem; } p.sub { color:var(--muted); margin:0 0 2rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1.5rem; }
+  a.btn { display:inline-block; background:var(--accent); color:#fff; text-decoration:none; font-weight:600;
+          padding:.75rem 1.25rem; border-radius:8px; }
+  @media (prefers-color-scheme: dark) { a.btn { color:#10210f; } }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:.35rem 1rem; margin:1.25rem 0 0; font-size:.9rem; }
+  dt { color:var(--muted); } dd { margin:0; overflow-wrap:anywhere; }
+  code { font-size:.85em; } ol { padding-left:1.25rem; } li { margin:.3rem 0; }
+  .note { color:var(--muted); font-size:.9rem; margin-top:2rem; }
+</style>
+<main>
+  <h1>$TITLE</h1>
+  <p class="sub">A copy of the server world, rebuilt every night. Explore it in singleplayer.</p>
+  <div class="card">
+    <a class="btn" href="$ZIP">Download world ($size)</a>
+    <dl>
+      <dt>Snapshot</dt><dd>$built</dd>
+      <dt>Minecraft</dt><dd>Java Edition ${version:-(see server)}</dd>
+      <dt>Includes</dt><dd>Overworld and Nether</dd>
+      <dt>SHA-256</dt><dd><code>$sum</code></dd>
+    </dl>
+  </div>
+  <h2>How to open it</h2>
+  <ol>
+    <li>Download and unzip it. You'll get a folder called <b>$TITLE</b>.</li>
+    <li>Move that folder into your Minecraft <code>saves</code> folder
+        (Windows: press Win+R, type <code>%appdata%\\.minecraft\\saves</code>).</li>
+    <li>Start Minecraft Java ${version:-}, choose Singleplayer, and it's in the list.</li>
+  </ol>
+  <p class="note">Changes you make in your copy stay on your computer; they don't affect the server.
+  Bedrock Edition can't open Java worlds. <a href="/">Back to the live map</a></p>
+</main>
+HTML
+
+# Publish atomically: never serve a half-written zip
+install -m 644 "$work/$ZIP" "$OUT/.$ZIP.new" && mv -f "$OUT/.$ZIP.new" "$OUT/$ZIP"
+install -m 644 "$work/index.html" "$OUT/.index.html.new" && mv -f "$OUT/.index.html.new" "$OUT/index.html"
+echo "World download published: $OUT/$ZIP ($size, $built)"
