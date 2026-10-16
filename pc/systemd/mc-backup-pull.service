@@ -1,0 +1,6 @@
+[Unit]
+Description=Pull Minecraft server backups to E:
+
+[Service]
+Type=oneshot
+ExecStart=%h/code/NiceWorkLad/mc-survival/pc/mc-backup-pull

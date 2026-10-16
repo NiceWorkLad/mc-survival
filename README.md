@@ -36,6 +36,7 @@ when re-syncing from the live server.
   backs that up with restic to `/var/backups/minecraft/restic` (7 daily / 4 weekly / 6 monthly).
 - **PC** (`pc/mc-backup-pull`, WSL): `restic copy` pulls new snapshots over SSH into
   `E:\MinecraftBackups\restic` (14 daily / 8 weekly / 12 monthly). Log: `~/.config/mc-backup/pull.log`.
+- PC schedule: systemd user timer `pc/systemd/mc-backup-pull.timer` (every 3h while WSL runs, symlinked into `~/.config/systemd/user/`).
 - One-time server setup: `sudo bash scripts/setup-backups.sh`.
 - The restic password lives in `/etc/mc-backup/restic-password` (server) and
   `~/.config/mc-backup/restic-password` (PC). **Keep a copy in a password manager**: without it

@@ -1,0 +1,10 @@
+[Unit]
+Description=Pull Minecraft backups every 3 hours while WSL is running
+
+[Timer]
+OnStartupSec=5min
+OnUnitActiveSec=3h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

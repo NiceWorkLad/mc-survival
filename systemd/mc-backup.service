@@ -4,6 +4,9 @@ Description=Backup Minecraft survival server
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/mc-backup
+# restic needs a cache dir; services have no $HOME
+CacheDirectory=mc-backup
+Environment=RESTIC_CACHE_DIR=/var/cache/mc-backup
 # Stay out of the game server's way
 Nice=10
 IOSchedulingClass=idle
