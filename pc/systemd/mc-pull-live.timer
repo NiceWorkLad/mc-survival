@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync LuckPerms permissions every 3 hours while WSL is running
+
+[Timer]
+OnStartupSec=10min
+OnUnitActiveSec=3h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

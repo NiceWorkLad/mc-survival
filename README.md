@@ -54,3 +54,11 @@ Restore a snapshot (PC example):
 
     ~/.local/bin/restic -r /mnt/e/MinecraftBackups/restic snapshots
     ~/.local/bin/restic -r /mnt/e/MinecraftBackups/restic restore latest --target /tmp/mc-restore
+
+## Live state back into git (PC)
+
+- `pc/mc-pull-live` (timer every 3h): exports LuckPerms groups/permissions to `luckperms/permissions.txt`
+  and commits + pushes when they change, so `/lp` edits get history. Change permissions in game, not in that file.
+- `pc/mc-pull-live --configs`: copies live config files over the working tree (secrets stay as
+  placeholders) so you can `git diff` what changed on the server, e.g. plugins rewriting their configs
+  or edits made in game. Nothing is committed automatically.

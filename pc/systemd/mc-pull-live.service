@@ -1,0 +1,6 @@
+[Unit]
+Description=Sync LuckPerms permissions from the Minecraft server into git
+
+[Service]
+Type=oneshot
+ExecStart=%h/code/NiceWorkLad/mc-survival/pc/mc-pull-live
