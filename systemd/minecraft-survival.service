@@ -11,6 +11,8 @@ ExecStart=/usr/bin/java -Xms2G -Xmx4G -jar /opt/minecraft/survival/paper.jar --n
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=60
+# Java exits 143 on SIGTERM; that is a clean stop, not a failure
+SuccessExitStatus=143
 
 [Install]
 WantedBy=multi-user.target
