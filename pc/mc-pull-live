@@ -1,0 +1,86 @@
+#!/bin/bash
+# Runs on the PC (WSL). Brings live server state back into the repo.
+#   mc-pull-live            export LuckPerms permissions; commit + push if they changed
+#   mc-pull-live --configs  also copy live config files into the working tree for review
+#                           (not committed; inspect with git diff, commit what you want to keep)
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SSH=(ssh -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10 gameServers)
+cd "$REPO"
+
+if ! "${SSH[@]}" true 2>/dev/null; then echo "server unreachable, skipping"; exit 0; fi
+
+# --- LuckPerms: query a copy of the H2 database, one line per permission, stable order
+mkdir -p luckperms
+"${SSH[@]}" bash -s > luckperms/permissions.txt.new <<'REMOTE'
+set -euo pipefail
+LP=/opt/minecraft/survival/plugins/LuckPerms
+H2=$(ls "$LP"/libs/h2-driver-*.jar | head -1)
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+cp "$LP/luckperms-h2-v2.mv.db" "$T/"
+q() {
+  java -cp "$H2" org.h2.tools.Shell -url "jdbc:h2:$T/luckperms-h2-v2" -user "" -password "" -sql "$1" \
+    | grep -v -E '^\(|^LINE *$'
+}
+cat <<'HDR'
+# LuckPerms permissions, exported from game-server by pc/mc-pull-live.
+# Read-only record for history: change permissions in game with /lp, not here.
+HDR
+echo; echo "## Groups"
+q "SELECT 'group ' || name || ': ' || permission || ' = ' || LOWER(\"VALUE\")
+     || CASE WHEN world  <> 'global' THEN ' [world='  || world  || ']' ELSE '' END
+     || CASE WHEN server <> 'global' THEN ' [server=' || server || ']' ELSE '' END
+     || CASE WHEN expiry > 0 THEN ' [expires=' || expiry || ']' ELSE '' END AS LINE
+   FROM luckperms_group_permissions ORDER BY name, permission"
+echo; echo "## Players"
+q "SELECT 'player ' || COALESCE(p.username, u.uuid) || ': ' || u.permission || ' = ' || LOWER(u.\"VALUE\")
+     || CASE WHEN u.expiry > 0 THEN ' [expires=' || u.expiry || ']' ELSE '' END AS LINE
+   FROM luckperms_user_permissions u LEFT JOIN luckperms_players p ON p.uuid = u.uuid
+   ORDER BY p.username, u.permission"
+REMOTE
+mv luckperms/permissions.txt.new luckperms/permissions.txt
+
+if [ -n "$(git status --porcelain -- luckperms/)" ]; then
+  git pull --ff-only --quiet || true
+  git add luckperms/permissions.txt
+  git commit --quiet -m "LuckPerms: sync permissions from server" -- luckperms/permissions.txt
+  git push --quiet
+  echo "LuckPerms permissions changed; committed and pushed $(git log --oneline -1)"
+else
+  echo "LuckPerms permissions unchanged."
+fi
+
+[ "${1:-}" = "--configs" ] || exit 0
+
+# --- Live configs into the working tree, for every config file the repo already tracks.
+# Repo path -> live path: server/X -> X, plugins/X -> plugins/X
+mapfile -t repo_files < <(git ls-files server plugins)
+live_files=("${repo_files[@]/#server\//}")
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+"${SSH[@]}" "cd /opt/minecraft/survival && tar cf - --ignore-failed-read ${live_files[*]@Q} 2>/dev/null" | tar xf - -C "$TMP"
+
+for i in "${!repo_files[@]}"; do
+  src="$TMP/${live_files[$i]}"; dst="$REPO/${repo_files[$i]}"
+  [ -f "$src" ] || continue
+  # Put secret placeholders back: any setting whose committed line holds ${VAR} keeps that line
+  git show "HEAD:${repo_files[$i]}" > "$TMP/.committed"
+  perl -e '
+    open my $c, "<", $ARGV[0]; my %keep;
+    while (<$c>) { $keep{$1} = $_ if /^([A-Za-z0-9_.-]+)[=:] *\$\{[A-Z_]+\}/;
+                   $ts = $_ if /^#[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9]{2} /; }
+    shift @ARGV;
+    while (<>) {
+      if (/^([A-Za-z0-9_.-]+)[=:]/ && exists $keep{$1}) { print $keep{$1}; next }
+      if (defined $ts && /^#[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9]{2} /) { print $ts; next }  # ignore restart timestamp
+      print;
+    }' "$TMP/.committed" "$src" > "$dst.new" 2>/dev/null || cp "$src" "$dst.new"
+  mv "$dst.new" "$dst"
+done
+
+if git diff --quiet -- server plugins; then
+  echo "Live configs match the repo."
+else
+  echo "Live configs differ from the repo:"; git diff --stat -- server plugins
+  echo "Review with 'git diff', then commit what you want to keep (or 'git checkout -- server plugins' to discard)."
+fi
