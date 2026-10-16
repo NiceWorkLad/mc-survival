@@ -28,3 +28,20 @@ an `mc-deploy` script that pulls, substitutes secrets and restarts is planned.
 
 Plugins rewrite their own configs on startup (adding comments, new defaults), so expect small diffs
 when re-syncing from the live server.
+
+## Backups
+
+- **Server** (`scripts/mc-backup`, nightly 04:30): pauses saving only while the world and a
+  consistent `sqlite3 .backup` of CoreProtect are copied to `/var/lib/mc-backup/stage`, then
+  backs that up with restic to `/var/backups/minecraft/restic` (7 daily / 4 weekly / 6 monthly).
+- **PC** (`pc/mc-backup-pull`, WSL): `restic copy` pulls new snapshots over SSH into
+  `E:\MinecraftBackups\restic` (14 daily / 8 weekly / 12 monthly). Log: `~/.config/mc-backup/pull.log`.
+- One-time server setup: `sudo bash scripts/setup-backups.sh`.
+- The restic password lives in `/etc/mc-backup/restic-password` (server) and
+  `~/.config/mc-backup/restic-password` (PC). **Keep a copy in a password manager**: without it
+  no backup can be restored.
+
+Restore a snapshot (PC example):
+
+    ~/.local/bin/restic -r /mnt/e/MinecraftBackups/restic snapshots
+    ~/.local/bin/restic -r /mnt/e/MinecraftBackups/restic restore latest --target /tmp/mc-restore

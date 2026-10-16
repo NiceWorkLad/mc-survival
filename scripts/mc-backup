@@ -1,40 +1,60 @@
 #!/bin/bash
+# Nightly backup of the survival server into a local restic repository.
+# Runs as root from mc-backup.service. Saving is paused only while the world
+# and databases are copied to a staging dir; restic then works from the copy.
 set -euo pipefail
 
 SRC=/opt/minecraft/survival
-DEST=/var/backups/minecraft
-KEEP=7
+STAGE=/var/lib/mc-backup/stage
 FIFO=/run/minecraft-survival.stdin
+export RESTIC_REPOSITORY=/var/backups/minecraft/restic
+export RESTIC_PASSWORD_FILE=/etc/mc-backup/restic-password
 
-mkdir -p "$DEST"
-ts=$(date +%F-%H%M)
-out="$DEST/survival-$ts.tgz"
 paused=0
-
 send() { echo "$*" > "$FIFO"; }
-
-cleanup() {
-  if [ "$paused" -eq 1 ]; then send "save-on"; fi
-}
+cleanup() { if [ "$paused" -eq 1 ]; then send "save-on"; fi; }
 trap cleanup EXIT
+
+mkdir -p "$STAGE"
 
 if systemctl is-active --quiet minecraft-survival; then
   paused=1
+  since=$(date '+%F %T')
   send "save-off"
   send "save-all flush"
-  sleep 15
+  # Wait for the flush to finish (up to 60s) rather than guessing with sleep
+  for _ in $(seq 1 60); do
+    journalctl -u minecraft-survival --since "$since" -q --no-pager | grep -q "Saved the game" && break
+    sleep 1
+  done
 fi
 
-rc=0
-tar czf "$out" -C "$SRC" \
-  world plugins config \
-  server.properties ops.json whitelist.json banned-players.json banned-ips.json \
-  bukkit.yml spigot.yml commands.yml wepif.yml \
-  || rc=$?
-# tar exits 1 when a file changed while reading; that's tolerable, anything higher is not
-[ "$rc" -le 1 ] || { echo "tar failed with code $rc"; rm -f "$out"; exit 1; }
+# Everything the server needs to come back, minus regenerable bulk.
+# Live databases are excluded here and snapshotted consistently below.
+rsync -a --delete \
+  --exclude=/bluemap/ --exclude=/cache/ --exclude=/libraries/ --exclude=/logs/ \
+  --exclude=/versions/ --exclude=/world-26.3-backup/ \
+  --exclude=/plugins/CoreProtect/database.db \
+  --exclude=/plugins/spark/tmp/ \
+  "$SRC"/ "$STAGE"/
 
-tar tzf "$out" >/dev/null   # integrity check
+sqlite3 "$SRC/plugins/CoreProtect/database.db" ".backup '$STAGE/plugins/CoreProtect/database.db'"
 
-ls -1t "$DEST"/survival-*.tgz | tail -n +$((KEEP + 1)) | xargs -r rm --
-echo "Backup complete: $out ($(du -h "$out" | cut -f1))"
+send "save-on"
+paused=0
+
+restic backup "$STAGE" --tag nightly --host game-server --quiet
+restic forget --tag nightly --host game-server \
+  --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune --quiet
+
+# Spot-check 5% of stored data each Sunday
+if [ "$(date +%u)" -eq 7 ]; then
+  restic check --read-data-subset=5%
+fi
+
+# Let the PC pull copies over SSH (repo stays encrypted; PC needs the password)
+chgrp -R mcbackup "$RESTIC_REPOSITORY"
+chmod -R g+rX "$RESTIC_REPOSITORY"
+chmod g+w "$RESTIC_REPOSITORY/locks"
+
+restic snapshots --latest 1 --compact

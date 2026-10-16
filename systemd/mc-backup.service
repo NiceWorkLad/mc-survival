@@ -4,3 +4,6 @@ Description=Backup Minecraft survival server
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/mc-backup
+# Stay out of the game server's way
+Nice=10
+IOSchedulingClass=idle

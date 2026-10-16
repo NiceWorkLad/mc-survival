@@ -1,0 +1,39 @@
+#!/bin/bash
+# Runs on the PC (WSL). Copies new snapshots from the server's restic repo
+# into a separate repo on E:, with its own longer retention.
+set -euo pipefail
+
+CONF="$HOME/.config/mc-backup"
+LOG="$CONF/pull.log"
+RESTIC="$HOME/.local/bin/restic"
+export RESTIC_REPOSITORY=/mnt/e/MinecraftBackups/restic
+export RESTIC_PASSWORD_FILE="$CONF/restic-password"
+FROM=sftp:gameServers:/var/backups/minecraft/restic
+SFTP_CMD="ssh -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10 gameServers -s sftp"
+
+mkdir -p "$CONF"
+exec >> "$LOG" 2>&1
+echo "=== $(date '+%F %T')"
+
+# First run: fetch the password the setup script left on the server
+if [ ! -s "$RESTIC_PASSWORD_FILE" ]; then
+  scp -q -o LogLevel=ERROR gameServers:restic-password.tmp "$RESTIC_PASSWORD_FILE"
+  chmod 600 "$RESTIC_PASSWORD_FILE"
+  ssh -o LogLevel=ERROR gameServers 'rm -f ~/restic-password.tmp'
+fi
+
+if ! ssh -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10 gameServers true; then
+  echo "server unreachable, skipping"; exit 0
+fi
+
+if [ ! -f "$RESTIC_REPOSITORY/config" ]; then
+  mkdir -p "$(dirname "$RESTIC_REPOSITORY")"
+  # Same chunking params as the server repo so copies deduplicate
+  "$RESTIC" init --from-repo "$FROM" --from-password-file "$RESTIC_PASSWORD_FILE" \
+    --copy-chunker-params -o sftp.command="$SFTP_CMD"
+fi
+
+"$RESTIC" copy --from-repo "$FROM" --from-password-file "$RESTIC_PASSWORD_FILE" \
+  -o sftp.command="$SFTP_CMD"
+"$RESTIC" forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+"$RESTIC" snapshots --latest 1 --compact
