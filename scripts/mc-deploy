@@ -4,7 +4,13 @@
 #   sudo mc-deploy --check    pull and show differences only (exit 1 if any)
 #   sudo mc-deploy --yes      apply without asking (restart still asks)
 # Never deletes files on the server; only adds or overwrites.
+#
+# The whole script is one function, called on the last line: bash then parses all of it
+# before running anything. mc-deploy installs itself, and without this a running copy
+# would read the new file from the old offset and execute fragments of it.
 set -euo pipefail
+
+main() {
 
 REPO=/home/niceworklad/mc-survival
 LIVE=/opt/minecraft/survival
@@ -150,3 +156,6 @@ if [[ "$r" =~ ^[Yy] ]]; then
 else
   echo "Not restarted. Changes take effect at the next restart: sudo systemctl restart $SERVICE"
 fi
+}
+
+main "$@"
