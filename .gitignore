@@ -8,7 +8,7 @@ secrets.env
 *.jar.disabled
 
 # Runtime data: lives in backups, not git
-world*/
+/world*/
 logs/
 cache/
 libraries/
