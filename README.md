@@ -85,4 +85,4 @@ Caddy (`caddy/Caddyfile`, deployed to `/etc/caddy/` by `mc-deploy`) owns the pub
 - The bot token is `DISCORD_BOT_TOKEN` in `/opt/minecraft/secrets.env`. It can't be generated, so
   `mc-deploy` stops until it's there. To set or replace it:
 
-      ssh -t gameServers 'read -rsp "Bot token: " t; echo; sudo sed -i "/^DISCORD_BOT_TOKEN=/d" /opt/minecraft/secrets.env; echo "DISCORD_BOT_TOKEN=$t" | sudo tee -a /opt/minecraft/secrets.env >/dev/null'
+      ssh -t gameServers 'read -rsp "Bot token: " t; echo; t=$(printf %s "$t" | tr -d "[:space:]"); [[ "$t" =~ ^[A-Za-z0-9_.-]{50,100}$ ]] || { echo "Not a bot token (${#t} characters), nothing saved"; exit 1; }; sudo sed -i "/^DISCORD_BOT_TOKEN=/d" /opt/minecraft/secrets.env; echo "DISCORD_BOT_TOKEN=$t" | sudo tee -a /opt/minecraft/secrets.env >/dev/null && echo "Token saved (${#t} characters)"'

@@ -56,7 +56,14 @@ if [ ${#missing[@]} -gt 0 ]; then
   echo "Missing secrets that must be added by hand to $SECRETS: ${missing[*]}"
   echo "(see $REPO/secrets.env.example)"; exit 1
 fi
-set -a; . "$SECRETS"; set +a
+# Read as plain KEY=value lines, not as shell: a stray space or quote in a value can't break this
+while IFS= read -r line; do
+  [[ "$line" =~ ^([A-Z_]+)=(.*)$ ]] && export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+done < "$SECRETS"
+if [[ -n "${DISCORD_BOT_TOKEN:-}" && ! "$DISCORD_BOT_TOKEN" =~ ^[A-Za-z0-9_.-]{50,100}$ ]]; then
+  echo "DISCORD_BOT_TOKEN in $SECRETS doesn't look like a bot token (${#DISCORD_BOT_TOKEN} characters;"
+  echo "a token is ~70 letters, digits, dots, dashes and underscores). Set it again: see the README."; exit 1
+fi
 export MASK_KEYS="$(cut -d= -f1 "$SECRETS" | tr '\n' ' ')"
 # Settings whose values are secrets, e.g. "rcon.password" (masked whatever their value)
 export MASK_SETTINGS="$(grep -rhoE '^[A-Za-z0-9_.-]+[=:] *\$\{[A-Z_]+\}' "$REPO/server" "$REPO/plugins" | sed -E 's/[=:].*//' | sort -u | tr '\n' ' ')"
