@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Post a daily leaderboard for one random stat category to Discord.
+
+Reads vanilla player stats (world/players/stats) and XP (world/players/data), ranks
+what each player gained since the previous run, and posts the top 5 with the bot.
+The first run (no saved totals yet) posts all-time totals instead.
+
+  mc-leaderboard                  pick a category, post, save totals
+  mc-leaderboard --dry-run        print the message; post and save nothing
+  mc-leaderboard --category xp    force a category (see --list)
+  mc-leaderboard --list           list categories
+
+Env: DISCORD_BOT_TOKEN, LEADERBOARD_CHANNEL. Run by mc-leaderboard.timer.
+"""
+import argparse, gzip, json, os, random, struct, sys, time, urllib.request
+
+LIVE = "/opt/minecraft/survival"
+WORLD = f"{LIVE}/world"
+STATE = "/var/lib/mc-leaderboard/state.json"
+TOP = 5
+RECENT = 4  # don't repeat any of the last N categories
+
+
+# --- Stats -------------------------------------------------------------------
+
+def custom(*keys):
+    return lambda s, xp: sum(s.get("minecraft:custom", {}).get(f"minecraft:{k}", 0) for k in keys)
+
+def mined(match):
+    return lambda s, xp: sum(v for k, v in s.get("minecraft:mined", {}).items() if match(k[10:]))
+
+def distance(s, xp):
+    # Every way of moving except falling and flying (/fly would make that one unfair)
+    return sum(v for k, v in s.get("minecraft:custom", {}).items()
+               if k.endswith("_one_cm") and k not in ("minecraft:fall_one_cm", "minecraft:fly_one_cm"))
+
+CROPS = {"wheat", "carrots", "potatoes", "beetroots", "nether_wart", "melon", "pumpkin", "cocoa"}
+
+def num(v): return f"{v:,}"
+def km(v): return f"{v / 100_000:,.1f} km" if v >= 100_000 else f"{v / 100:,.0f} m"
+def hours(v): return f"{v // 72000}h {v // 1200 % 60}m"
+def hearts(v): return f"{v / 20:,.0f} ❤"
+
+# key: (emoji, title, value function, formatter)
+CATEGORIES = {
+    "animals_bred": ("🐄", "Animals bred", custom("animals_bred"), num),
+    "diamonds": ("💎", "Diamonds mined", mined(lambda b: b in ("diamond_ore", "deepslate_diamond_ore")), num),
+    "distance": ("🚶", "Distance travelled", distance, km),
+    "mob_kills": ("⚔️", "Mobs killed", custom("mob_kills"), num),
+    "fish": ("🎣", "Fish caught", custom("fish_caught"), num),
+    "blocks_mined": ("⛏️", "Blocks mined", mined(lambda b: True), num),
+    "deaths": ("💀", "Deaths", custom("deaths"), num),
+    "crops": ("🌾", "Crops harvested", mined(lambda b: b in CROPS), num),
+    "trades": ("💰", "Villager trades", custom("traded_with_villager"), num),
+    "play_time": ("⏱️", "Time played", custom("play_time"), hours),
+    "xp": ("✨", "XP collected", lambda s, xp: xp, num),
+    "logs": ("🪓", "Logs chopped", mined(lambda b: b.endswith(("_log", "_stem")) and not b.startswith("stripped_")), num),
+    "jumps": ("🐇", "Jumps", custom("jump"), num),
+    "debris": ("🔥", "Ancient debris mined", mined(lambda b: b == "ancient_debris"), num),
+    "damage_dealt": ("🗡️", "Damage dealt", custom("damage_dealt"), hearts),
+    "enchants": ("📚", "Items enchanted", custom("enchant_item"), num),
+}
+
+
+def read_nbt(path):
+    """Top-level tags of a gzipped NBT file (enough to read XpTotal)."""
+    data = gzip.open(path).read()
+    pos = 0
+
+    def take(fmt):
+        nonlocal pos
+        v = struct.unpack_from(">" + fmt, data, pos); pos += struct.calcsize(">" + fmt)
+        return v[0]
+
+    def string():
+        nonlocal pos
+        n = take("H"); s = data[pos:pos + n].decode("utf-8", "replace"); pos += n
+        return s
+
+    def payload(t):
+        nonlocal pos
+        if t in (1, 2, 3, 4, 5, 6):
+            return take("bhiqfd"[t - 1])
+        if t in (7, 11, 12):  # byte/int/long arrays: skip
+            n = take("i"); pos += n * {7: 1, 11: 4, 12: 8}[t]; return None
+        if t == 8:
+            return string()
+        if t == 9:
+            et, n = take("b"), take("i")
+            return [payload(et) for _ in range(n)]
+        if t == 10:
+            out = {}
+            while (ct := take("b")) != 0:
+                name = string(); out[name] = payload(ct)
+            return out
+        raise ValueError(f"bad NBT tag {t}")
+
+    take("b"); string()
+    return payload(10)
+
+
+def names():
+    found = {}
+    try:
+        found = {e["uuid"]: e["name"] for e in json.load(open(f"{LIVE}/usercache.json"))}
+    except (OSError, ValueError):
+        pass
+    return found
+
+
+def collect():
+    """{uuid: {category: total}} for every player with a stats file."""
+    out = {}
+    sdir = f"{WORLD}/players/stats"
+    for f in sorted(os.listdir(sdir)):
+        if not f.endswith(".json"):
+            continue
+        uuid = f[:-5]
+        try:
+            stats = json.load(open(f"{sdir}/{f}"))["stats"]
+        except (OSError, ValueError, KeyError):
+            continue
+        try:
+            xp = int(read_nbt(f"{WORLD}/players/data/{uuid}.dat").get("XpTotal", 0))
+        except (OSError, ValueError, struct.error, EOFError):
+            xp = 0
+        out[uuid] = {k: int(fn(stats, xp)) for k, (_, _, fn, _) in CATEGORIES.items()}
+    return out
+
+
+# --- Board -------------------------------------------------------------------
+
+def gains(now, before):
+    if before is None:
+        return now
+    out = {}
+    for uuid, totals in now.items():
+        prev = before.get(uuid, {})
+        # XP total resets on death; count what was collected since then
+        out[uuid] = {k: v - prev.get(k, 0) if v >= prev.get(k, 0) else v for k, v in totals.items()}
+    return out
+
+
+def choose(scores, recent, forced):
+    if forced:
+        return forced
+    active = {k: sum(1 for p in scores.values() if p[k] > 0) for k in CATEGORIES}
+    for need in (2, 1):  # prefer categories at least two players took part in
+        pool = [k for k, n in active.items() if n >= need and k not in recent]
+        pool = pool or [k for k, n in active.items() if n >= need]
+        if pool:
+            return random.choice(pool)
+    return None
+
+
+def build(cat, scores, totals, who, period):
+    emoji, title, _, fmt = CATEGORIES[cat]
+    ranked = sorted(((p[cat], u) for u, p in scores.items() if p[cat] > 0), reverse=True)[:TOP]
+    medals = ["🥇", "🥈", "🥉"] + [f"`{i}.`" for i in range(4, TOP + 1)]
+    lines = [f"{medals[i]} **{who.get(u, u[:8])}** · {fmt(v)}" for i, (v, u) in enumerate(ranked)]
+    leader_v, leader_u = max((p[cat], u) for u, p in totals.items())
+    return {
+        "title": f"{emoji} Daily leaderboard: {title}",
+        "description": "\n".join(lines) or "Nobody yet!",
+        "color": 0x5865F2,
+        "footer": {"text": f"{period} · All-time leader: {who.get(leader_u, leader_u[:8])} ({fmt(leader_v)})"},
+    }
+
+
+def post(embed):
+    token, channel = os.environ.get("DISCORD_BOT_TOKEN"), os.environ.get("LEADERBOARD_CHANNEL")
+    if not token or not channel:
+        sys.exit("DISCORD_BOT_TOKEN and LEADERBOARD_CHANNEL must be set")
+    req = urllib.request.Request(
+        f"https://discord.com/api/v10/channels/{channel}/messages",
+        data=json.dumps({"embeds": [embed]}).encode(),
+        headers={"Authorization": f"Bot {token}", "Content-Type": "application/json",
+                 "User-Agent": "DiscordBot (https://github.com/NiceWorkLad/mc-survival, 1.0)"})
+    urllib.request.urlopen(req, timeout=30).read()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--category", choices=sorted(CATEGORIES))
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--state", default=STATE)
+    a = ap.parse_args()
+    if a.list:
+        for k, (e, t, _, _) in CATEGORIES.items():
+            print(f"{k:14} {e} {t}")
+        return
+
+    try:
+        state = json.load(open(a.state))
+    except (OSError, ValueError):
+        state = {}
+    totals = collect()
+    before = state.get("totals")
+    scores = gains(totals, before)
+
+    if before is None:
+        period = "All-time totals (first leaderboard)"
+    else:
+        h = round((time.time() - state.get("time", 0)) / 3600)
+        period = "Last 24 hours" if 20 <= h <= 28 else f"Last {h} hours"
+    cat = choose(scores, state.get("recent", []), a.category)
+    if cat is None:  # nobody played: show all-time instead
+        scores, period = totals, "Quiet day, so here are the all-time totals"
+        cat = choose(scores, state.get("recent", []), None)
+    if cat is None:
+        print("no stats yet"); return
+
+    embed = build(cat, scores, totals, names(), period)
+    if a.dry_run:
+        print(embed["title"]); print(embed["description"]); print(embed["footer"]["text"])
+        return
+    post(embed)
+    state = {"time": time.time(), "totals": totals, "recent": ([cat] + state.get("recent", []))[:RECENT]}
+    os.makedirs(os.path.dirname(a.state), exist_ok=True)
+    tmp = a.state + ".tmp"
+    json.dump(state, open(tmp, "w")); os.replace(tmp, a.state)
+    print(f"posted {cat}")
+
+
+if __name__ == "__main__":
+    main()

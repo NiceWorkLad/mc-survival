@@ -7,6 +7,7 @@ Chunky         | 1.5.3                 | Chunky-Bukkit-1.5.3.jar            | 53
 CoreProtect    | CE-24.1               | CoreProtect-CE-24.1.jar            | a2acef7c06ef201355cef07d591a6055dfed358ad768faaaaaf4e276865ecc97 | https://modrinth.com/plugin/coreprotect
 EssentialsX    | 2.22.0                | EssentialsX-2.22.0.jar             | bda4685105977fca2e209820a9f0ad24275bd103390a03236f38e59bfdac58e6 | https://essentialsx.net/downloads.html
 EssentialsXSpawn | 2.22.0              | EssentialsXSpawn-2.22.0.jar        | dd5377c4c921b9b67814209f4f6646ffbb959729003e721ec5e63c47c7c010b8 | https://essentialsx.net/downloads.html
+EssentialsXDiscord | 2.22.0             | EssentialsXDiscord-2.22.0.jar      | d7bd00c2f67f2132a3ac88b9477f9dfb1edd9ced25c9e3ba583dc882c68ce8e0 | https://essentialsx.net/downloads.html
 Floodgate      | 2.2.5-SNAPSHOT b141   | floodgate-spigot.jar               | 21570aff9ce17d6983928e8552777760e1ede5050026b04c686b0ae112e6fd7e | https://geysermc.org/download
 FreedomChat    | 1.7.9                 | FreedomChat-Paper-1.7.9.jar        | 878df27b1e8f701a3161373fee602fe5b11e3fd213bda4aa6c8cf8a3778c6d27 | https://modrinth.com/plugin/freedomchat
 Geyser         | 2.11.3-SNAPSHOT       | Geyser-Spigot.jar                  | 6fed2d9711e2db3c365508ec10db36d06a0199abd226159d23d57f82662fd7a6 | https://geysermc.org/download

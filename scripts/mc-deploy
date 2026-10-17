@@ -44,10 +44,18 @@ sudo -u "$owner" git -C "$REPO" pull --ff-only --quiet
 bold "Repo at $(sudo -u "$owner" git -C "$REPO" log --oneline -1)"
 
 # --- 2. Secrets: create any listed in secrets.env.example that are missing
+# (those marked "manual", like the Discord token, can't be generated: stop and say so)
 touch "$SECRETS"; chmod 600 "$SECRETS"; chown root:root "$SECRETS"
-while IFS= read -r key; do
-  grep -q "^$key=" "$SECRETS" || { echo "$key=$(openssl rand -hex 20)" >> "$SECRETS"; echo "generated secret $key"; }
-done < <(sed -nE 's/^([A-Z_]+)=.*/\1/p' "$REPO/secrets.env.example")
+missing=()
+while IFS='=' read -r key val; do
+  grep -q "^$key=" "$SECRETS" && continue
+  if [ "$val" = manual ]; then missing+=("$key"); continue; fi
+  echo "$key=$(openssl rand -hex 20)" >> "$SECRETS"; echo "generated secret $key"
+done < <(grep -E '^[A-Z_]+=' "$REPO/secrets.env.example")
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "Missing secrets that must be added by hand to $SECRETS: ${missing[*]}"
+  echo "(see $REPO/secrets.env.example)"; exit 1
+fi
 set -a; . "$SECRETS"; set +a
 export MASK_KEYS="$(cut -d= -f1 "$SECRETS" | tr '\n' ' ')"
 # Settings whose values are secrets, e.g. "rcon.password" (masked whatever their value)
