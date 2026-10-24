@@ -576,22 +576,22 @@ function render() {
 }
 
 function renderChart() {
-  const svg = $("chart"), days = data.daily, W = svg.clientWidth || 600, H = 190, L = 34, B = 22, T = 8;
+  const svg = $("chart"), days = data.daily, width = svg.clientWidth || 600, height = 190, padL = 34, padB = 22, padT = 8;
   const max = Math.max(1, ...days.map(d => d.hours));
-  const step = max <= 4 ? 1 : max <= 10 ? 2 : max <= 25 ? 5 : 10, top = Math.ceil(max / step) * step;
-  const y = v => T + (H - T - B) * (1 - v / top), bw = (W - L) / days.length, gap = Math.min(4, bw * 0.25);
+  const step = max <= 4 ? 1 : max <= 10 ? 2 : max <= 25 ? 5 : 10, yMax = Math.ceil(max / step) * step;
+  const y = v => padT + (height - padT - padB) * (1 - v / yMax), bw = (width - padL) / days.length, gap = Math.min(4, bw * 0.25);
   let g = '<g class="axis">';
-  for (let v = 0; v <= top; v += step) g += `<line x1="${L}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  for (let v = 0; v <= yMax; v += step) g += `<line x1="${padL}" x2="${width}" y1="${y(v)}" y2="${y(v)}"/><text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
   days.forEach((d, i) => { if (i % 5 === (days.length - 1) % 5) {
     const dd = new Date(d.date + "T12:00");
-    g += `<text x="${L + i * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${dd.toLocaleDateString(undefined, {day: "numeric", month: "short"})}</text>`; } });
+    g += `<text x="${padL + i * bw + bw / 2}" y="${height - 4}" text-anchor="middle">${dd.toLocaleDateString(undefined, {day: "numeric", month: "short"})}</text>`; } });
   g += "</g>";
   days.forEach((d, i) => {
-    const x = L + i * bw + gap / 2, w = bw - gap, h = y(0) - y(d.hours), r = Math.min(4, w / 2, h);
-    g += `<rect class="hit" data-i="${i}" x="${L + i * bw}" y="${T}" width="${bw}" height="${H - T - B}" fill="transparent"/>`;
+    const x = padL + i * bw + gap / 2, w = bw - gap, h = y(0) - y(d.hours), r = Math.min(4, w / 2, h);
+    g += `<rect class="hit" data-i="${i}" x="${padL + i * bw}" y="${padT}" width="${bw}" height="${height - padT - padB}" fill="transparent"/>`;
     g += d.hours > 0 ? `<path class="bar" data-i="${i}" d="M${x},${y(0)} V${y(d.hours) + r} q0,-${r} ${r},-${r} H${x + w - r} q${r},0 ${r},${r} V${y(0)} Z"/>` : "<g></g>";
   });
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = g;
   const tip = $("tip");
   svg.querySelectorAll(".hit").forEach(el => {
@@ -599,9 +599,9 @@ function renderChart() {
       const d = days[+el.dataset.i], dd = new Date(d.date + "T12:00");
       tip.innerHTML = `<b>${dd.toLocaleDateString(undefined, {weekday: "short", day: "numeric", month: "short"})}</b><br>${d.hours.toFixed(1)} h played` +
         (d.players.length ? `<br>${d.players.map(esc).join(", ")}` : "<br>nobody played");
-      const x = (+el.getAttribute("x") + bw / 2) / W * svg.clientWidth;
+      const x = (+el.getAttribute("x") + bw / 2) / width * svg.clientWidth;
       tip.style.left = Math.min(Math.max(x, 90), svg.clientWidth - 90) + "px";
-      tip.style.top = (y(d.hours) / H * svg.clientHeight - 6) + "px";
+      tip.style.yMax = (y(d.hours) / height * svg.clientHeight - 6) + "px";
       tip.style.display = "block";
     });
     el.addEventListener("mouseleave", () => tip.style.display = "none");
