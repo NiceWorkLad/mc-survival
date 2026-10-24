@@ -133,6 +133,10 @@ for c in "${changed[@]}"; do
   echo "updated $d/$rel"
 done
 [ "$need_reload_units" -eq 1 ] && systemctl daemon-reload && echo "systemd reloaded"
+# The dashboard holds no state, so pick up a new version of it straight away
+if printf '%s\n' "${changed[@]}" | grep -qE '^(bin\|mc-dashboard|systemd\|mc-dashboard\.service)$'; then
+  systemctl try-restart mc-dashboard && echo "dashboard restarted"
+fi
 
 # Caddy fronts BlueMap on the public port. If the port is still held (e.g. BlueMap is
 # moving off it and the server hasn't restarted yet), retry after the restart below.

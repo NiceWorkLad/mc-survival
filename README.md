@@ -71,6 +71,21 @@ Caddy (`caddy/Caddyfile`, deployed to `/etc/caddy/` by `mc-deploy`) owns the pub
   atomically to `/var/www/world/`.
 - everything else: reverse-proxied to BlueMap on `127.0.0.1:8101`.
 
+## Dashboard (port 8200, home network only)
+
+`scripts/mc-dashboard` (run by `mc-dashboard.service`) serves a stats page at http://192.168.0.253:8200:
+who's online, recent players, every player's stats (play time, deaths, distance, ...), hours played per
+day, an activity feed (joins, deaths, advancements, chat, restarts) and machine stats. It reads the
+server's own logs and player files plus a status ping, so no plugin or RCON is involved. It refuses
+non-private client addresses, and ufw only opens 8200 to the LAN; don't forward it on the router.
+`mc-deploy` restarts it when it changes. Check its data with `sudo -u minecraft mc-dashboard --dump`.
+
+One-time setup on the server:
+
+    sudo mc-deploy
+    sudo systemctl enable --now mc-dashboard
+    sudo ufw allow from 192.168.0.0/24 to any port 8200 proto tcp comment 'Dashboard, home network only'
+
 ## Discord
 
 - **Chat bridge + feed**: EssentialsX Discord (`plugins/EssentialsDiscord/config.yml`). Chat both ways,

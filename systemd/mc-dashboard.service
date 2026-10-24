@@ -1,0 +1,18 @@
+[Unit]
+Description=Minecraft server dashboard (home network, port 8200)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Player save files are only readable by the server's user
+User=minecraft
+ExecStart=/usr/local/bin/mc-dashboard
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

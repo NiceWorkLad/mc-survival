@@ -1,0 +1,708 @@
+#!/usr/bin/env python3
+"""Home-network dashboard for the survival server: who's online, recent players,
+every player's stats, and an activity feed (joins, deaths, advancements, chat).
+
+Everything comes from files the server already writes (logs/, usercache.json,
+world/players/stats, Essentials userdata) plus a status ping to 127.0.0.1:25565,
+so it needs no plugin and no RCON. Only answers clients on private addresses;
+the firewall also limits the port to the LAN.
+
+  mc-dashboard                 serve on 0.0.0.0:8200
+  mc-dashboard --port 8300     another port
+  mc-dashboard --dump          print the JSON once and exit
+
+Run by mc-dashboard.service as the minecraft user (player files are only readable by it).
+"""
+import argparse, datetime as dt, gzip, ipaddress, json, os, re, socket, struct, subprocess, sys, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+LIVE = "/opt/minecraft/survival"
+WORLD = f"{LIVE}/world"
+LOGS = f"{LIVE}/logs"
+WORLD_ZIP = "/var/www/world/survival-world.zip"
+SERVICE = "minecraft-survival.service"
+FEED = 200      # events sent to the page
+DAYS = 30       # days in the activity chart
+CACHE = 10      # seconds a snapshot is reused
+
+
+# --- Status ping -------------------------------------------------------------
+
+def varint(n):
+    n &= 0xFFFFFFFF
+    out = b""
+    while True:
+        b, n = n & 0x7F, n >> 7
+        out += bytes([b | (0x80 if n else 0)])
+        if not n:
+            return out
+
+
+def ping(host="127.0.0.1", port=25565):
+    """Server list ping: version, player count and up to 12 sample names."""
+    with socket.create_connection((host, port), timeout=3) as s:
+        h = host.encode()
+        hs = varint(0) + varint(-1) + varint(len(h)) + h + struct.pack(">H", port) + varint(1)
+        s.sendall(varint(len(hs)) + hs + b"\x01\x00")
+        f = s.makefile("rb")
+
+        def rv():
+            n = shift = 0
+            while True:
+                b = f.read(1)
+                if not b:
+                    raise ConnectionError("closed")
+                n |= (b[0] & 0x7F) << shift; shift += 7
+                if not b[0] & 0x80:
+                    return n
+        rv(); rv()  # packet length, id
+        return json.loads(f.read(rv()))
+
+
+# --- Logs --------------------------------------------------------------------
+
+LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[([^\]]+)/INFO\]: (.*)$")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+JOIN = re.compile(r"^(\S+) joined the game$")
+LEAVE = re.compile(r"^(\S+) left the game$")
+ADV = re.compile(r"^(\S+) has (?:made the advancement|completed the challenge|reached the goal) \[(.+)\]$")
+CHAT = re.compile(r"^(?:\[Not Secure\] )?<([^>\s]+)> (.*)$")
+DEATH = re.compile(r"^(\S+) (was |died|drowned|blew up|burned|fell |hit the ground|went up in flames|walked into|"
+                   r"tried to swim|experienced kinetic|froze|starved|suffocated|withered|discovered the floor|"
+                   r"didn't want to live|left the confines|went off with)")
+START = re.compile(r"^Done \([\d.]+s\)! For help")
+STOP = "Stopping server"
+_parsed = {}  # rotated log name -> events (those files never change)
+
+
+def parse_log(path, base, backwards):
+    """Events in one log. Lines only carry a time; the date is the file's date, plus a
+    day each time the clock wraps past midnight. For latest.log the date is counted
+    back from its modification time (the time of its last line)."""
+    opener = gzip.open if path.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    rows, prev, day = [], -1, 0
+    for raw in lines:
+        m = LINE.match(ANSI.sub("", raw))
+        if not m:
+            continue
+        secs = int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+        if secs < prev:
+            day += 1
+        prev = secs
+        rows.append((day, secs, m[4], m[5]))
+    if backwards and rows:
+        base -= dt.timedelta(days=rows[-1][0])
+    out = []
+    for day, secs, thread, msg in rows:
+        t = time.mktime((base + dt.timedelta(days=day)).timetuple()) + secs
+        ev = classify(thread, msg)
+        if ev:
+            out.append({"t": t, **ev})
+    return out
+
+
+def classify(thread, msg):
+    if thread.startswith("Async Chat Thread"):
+        if m := CHAT.match(msg):
+            return {"type": "chat", "name": m[1], "text": m[2]}
+        return None
+    if thread != "Server thread":
+        return None
+    if m := JOIN.match(msg):
+        return {"type": "join", "name": m[1], "text": "joined"}
+    if m := LEAVE.match(msg):
+        return {"type": "leave", "name": m[1], "text": "left"}
+    if m := ADV.match(msg):
+        return {"type": "advancement", "name": m[1], "text": m[2]}
+    if m := DEATH.match(msg):
+        return {"type": "death", "name": m[1], "text": msg[len(m[1]) + 1:]}
+    if START.match(msg):
+        return {"type": "server", "name": None, "text": "Server started"}
+    if msg == STOP:
+        return {"type": "server", "name": None, "text": "Server stopped"}
+    return None
+
+
+def all_events():
+    files = []
+    for f in os.listdir(LOGS):
+        if m := re.match(r"^(\d{4})-(\d\d)-(\d\d)-(\d+)\.log\.gz$", f):
+            files.append(((m[1], m[2], m[3], int(m[4])), f))
+    events = []
+    for _, f in sorted(files):
+        if f not in _parsed:
+            base = dt.datetime.strptime(f[:10], "%Y-%m-%d")
+            _parsed[f] = parse_log(f"{LOGS}/{f}", base, False)
+        events += _parsed[f]
+    latest = f"{LOGS}/latest.log"
+    if os.path.exists(latest):
+        mday = dt.datetime.fromtimestamp(os.path.getmtime(latest)).replace(hour=0, minute=0, second=0, microsecond=0)
+        events += parse_log(latest, mday, True)
+    # Death regex can match a non-player line ("Zombie was ..."); keep only names that joined
+    joined = {e["name"] for e in events if e["type"] == "join"}
+    return [e for e in events if e["type"] != "death" or e["name"] in joined]
+
+
+def sessions(events, running, now):
+    """[(name, start, end, still_online)] from join/leave pairs. A server stop or
+    crash (next start without a stop) ends everyone's session."""
+    out, open_, last = [], {}, None
+    for e in events:
+        if e["type"] == "join":
+            open_[e["name"]] = e["t"]
+        elif e["type"] == "leave" and e["name"] in open_:
+            out.append((e["name"], open_.pop(e["name"]), e["t"], False))
+        elif e["type"] == "server":
+            end = e["t"] if e["text"] == "Server stopped" else (last or e["t"])
+            out += [(n, s, end, False) for n, s in open_.items()]
+            open_ = {}
+        last = e["t"]
+    out += [(n, s, now if running else last, running) for n, s in open_.items()]
+    return out
+
+
+# --- Player files ------------------------------------------------------------
+
+def load_json(path, default):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def player_stats(uuid):
+    s = load_json(f"{WORLD}/players/stats/{uuid}.json", {}).get("stats", {})
+    c = s.get("minecraft:custom", {})
+    adv = load_json(f"{WORLD}/players/advancements/{uuid}.json", {})
+    return {
+        "play_ticks": c.get("minecraft:play_time", 0),
+        "deaths": c.get("minecraft:deaths", 0),
+        "mob_kills": c.get("minecraft:mob_kills", 0),
+        "distance_cm": sum(v for k, v in c.items() if k.endswith("_one_cm")
+                           and k not in ("minecraft:fall_one_cm", "minecraft:fly_one_cm")),
+        "blocks_mined": sum(s.get("minecraft:mined", {}).values()),
+        "advancements": sum(1 for k, v in adv.items() if isinstance(v, dict) and v.get("done")
+                            and not k.startswith("minecraft:recipes/")),
+    }
+
+
+def essentials_times(uuid):
+    try:
+        with open(f"{LIVE}/plugins/Essentials/userdata/{uuid}.yml") as fh:
+            text = fh.read()
+    except OSError:
+        return {}
+    out = {}
+    for k in ("login", "logout"):
+        if m := re.search(rf"^  {k}: (\d+)$", text, re.M):
+            out[k] = int(m[1]) / 1000
+    return out
+
+
+# --- Machine -----------------------------------------------------------------
+
+_world_size = (0, 0)
+
+
+def world_bytes():
+    global _world_size
+    if time.time() - _world_size[0] > 900:
+        total = 0
+        for root, _, names in os.walk(WORLD):
+            for n in names:
+                try:
+                    total += os.lstat(os.path.join(root, n)).st_size
+                except OSError:
+                    pass
+        _world_size = (time.time(), total)
+    return _world_size[1]
+
+
+def machine():
+    out = {}
+    try:
+        pid = subprocess.run(["systemctl", "show", "-p", "MainPID", "--value", SERVICE],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        with open(f"/proc/{pid}/status") as fh:
+            out["mem_rss"] = int(re.search(r"^VmRSS:\s+(\d+) kB", fh.read(), re.M)[1]) * 1024
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        pass
+    try:
+        with open("/proc/loadavg") as fh:
+            out["load"] = float(fh.read().split()[0])
+        out["cpus"] = os.cpu_count()
+        with open("/proc/meminfo") as fh:
+            mi = {k: int(v.split()[0]) * 1024 for k, v in (l.split(":", 1) for l in fh)}
+        out["ram_total"], out["ram_free"] = mi["MemTotal"], mi["MemAvailable"]
+        st = os.statvfs(LIVE)
+        out["disk_total"], out["disk_free"] = st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
+    except (OSError, KeyError, ValueError):
+        pass
+    out["world_bytes"] = world_bytes()
+    try:
+        out["world_zip_time"] = os.path.getmtime(WORLD_ZIP)
+    except OSError:
+        pass
+    return out
+
+
+# --- Snapshot ----------------------------------------------------------------
+
+def snapshot():
+    now = time.time()
+    server = {"up": False}
+    try:
+        p = ping()
+        desc = p.get("description", "")
+        server = {"up": True, "version": p.get("version", {}).get("name"),
+                  "online": p.get("players", {}).get("online", 0), "max": p.get("players", {}).get("max", 0),
+                  "motd": desc.get("text", "") if isinstance(desc, dict) else str(desc),
+                  "sample": [s["name"] for s in p.get("players", {}).get("sample", [])]}
+    except (OSError, ValueError):
+        pass
+
+    events = all_events()
+    sess = sessions(events, server["up"], now)
+    starts = [e["t"] for e in events if e["type"] == "server" and e["text"] == "Server started"]
+    if server["up"] and starts:
+        server["since"] = starts[-1]
+
+    # Players: everyone the server has cached or kept stats for
+    names = {e["uuid"]: e["name"] for e in load_json(f"{LIVE}/usercache.json", [])}
+    try:
+        for f in os.listdir(f"{WORLD}/players/stats"):
+            if f.endswith(".json"):
+                names.setdefault(f[:-5], f[:8])
+    except OSError:
+        pass
+    ops = {o.get("uuid") for o in load_json(f"{LIVE}/ops.json", [])}
+    banned = {b.get("uuid") for b in load_json(f"{LIVE}/banned-players.json", [])}
+    by_name = {}
+    for name, start, end, online in sess:
+        by_name.setdefault(name, []).append((start, end, online))
+
+    players = []
+    for uuid, name in names.items():
+        mine = sorted(by_name.get(name, []))
+        ess = essentials_times(uuid)
+        online = bool(mine and mine[-1][2]) or name in server.get("sample", [])
+        last = max([e for _, e, o in mine if not o] + [ess.get("logout", 0)]) or None
+        players.append({
+            "name": name, "uuid": uuid, "bedrock": uuid.startswith("00000000-0000-0000-"),
+            "online": online, "online_since": mine[-1][0] if online and mine else None,
+            "first_seen": mine[0][0] if mine else ess.get("login"),
+            "last_seen": now if online else last,
+            "last_session": (mine[-1][1] - mine[-1][0]) if mine else None,
+            "sessions": len(mine), "op": uuid in ops, "banned": uuid in banned,
+            "week_secs": sum(max(0, e - max(s, now - 7 * 86400)) for s, e, _ in mine),
+            **player_stats(uuid),
+        })
+
+    # Daily activity: player-hours (sessions split at midnight) and distinct players
+    today = dt.date.today()
+    days = {today - dt.timedelta(days=i): [0.0, set()] for i in range(DAYS)}
+    for name, start, end, _ in sess:
+        t = start
+        while t < end:
+            d = dt.date.fromtimestamp(t)
+            nxt = min(end, time.mktime((d + dt.timedelta(days=1)).timetuple()))
+            if d in days:
+                days[d][0] += nxt - t; days[d][1].add(name)
+            t = nxt
+    daily = [{"date": d.isoformat(), "hours": round(v[0] / 3600, 2), "players": sorted(v[1])}
+             for d, v in sorted(days.items())]
+
+    week = now - 7 * 86400
+    return {
+        "generated": now, "server": server, "machine": machine(),
+        "players": players, "daily": daily, "events": events[-FEED:][::-1],
+        "week": {
+            "players": len({n for n, s, e, _ in sess if e >= week}),
+            "hours": round(sum(p["week_secs"] for p in players) / 3600, 1),
+            "deaths": sum(1 for e in events if e["type"] == "death" and e["t"] >= week),
+            "advancements": sum(1 for e in events if e["type"] == "advancement" and e["t"] >= week),
+            "new": sum(1 for p in players if p["first_seen"] and p["first_seen"] >= week),
+        },
+    }
+
+
+_lock, _cached = threading.Lock(), (0, b"")
+
+
+def cached_json():
+    global _cached
+    with _lock:
+        if time.time() - _cached[0] > CACHE:
+            _cached = (time.time(), json.dumps(snapshot()).encode())
+        return _cached[1]
+
+
+# --- HTTP --------------------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            ip = ipaddress.ip_address(self.client_address[0])
+            ip = getattr(ip, "ipv4_mapped", None) or ip
+            if not (ip.is_private or ip.is_loopback):
+                return self.send_error(403, "Home network only")
+        except ValueError:
+            return self.send_error(403)
+        path = self.path.split("?")[0]
+        if path == "/api/status":
+            try:
+                body, ctype = cached_json(), "application/json"
+            except Exception as e:  # keep the page alive; show the error there
+                self.log_error("snapshot failed: %r", e)
+                return self.send_error(500, "Could not read server data")
+        elif path in ("/", "/index.html"):
+            body, ctype = PAGE.encode(), "text/html; charset=utf-8"
+        else:
+            return self.send_error(404)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass  # requests every 15s would flood the journal
+
+
+class Server(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+    daemon_threads = True
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
+PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Survival Server Dashboard</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f4f3ef; --surface: #fcfcfb; --border: #e3e1da; --grid: #ebe9e3;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #85837d;
+  --accent: #2a78d6; --bar: #2a78d6; --bar-hover: #1c5fae;
+  --good: #008300; --good-bg: #e2f2e2; --bad: #c62f2e; --bad-bg: #fbe6e5;
+  --gold: #a86f00; --gold-bg: #fbf0d6; --chip: #ecebe6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --border: #2d2d2b; --grid: #262624;
+    --text: #f0efec; --text-2: #c3c2b7; --muted: #8e8d86;
+    --accent: #5a9cec; --bar: #3987e5; --bar-hover: #7fb2f0;
+    --good: #4cc04c; --good-bg: #183218; --bad: #ef7d7c; --bad-bg: #3a1c1c;
+    --gold: #e0a93a; --gold-bg: #33290f; --chip: #262624;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --border: #2d2d2b; --grid: #262624;
+  --text: #f0efec; --text-2: #c3c2b7; --muted: #8e8d86;
+  --accent: #5a9cec; --bar: #3987e5; --bar-hover: #7fb2f0;
+  --good: #4cc04c; --good-bg: #183218; --bad: #ef7d7c; --bad-bg: #3a1c1c;
+  --gold: #e0a93a; --gold-bg: #33290f; --chip: #262624;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 12px; }
+.status { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 99px;
+  font-size: 13px; font-weight: 600; }
+.status.up { background: var(--good-bg); color: var(--good); }
+.status.down { background: var(--bad-bg); color: var(--bad); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.meta { color: var(--muted); font-size: 13px; margin-left: auto; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.tile .label { color: var(--text-2); font-size: 12px; }
+.tile .value { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.tile .sub { color: var(--muted); font-size: 12px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+@media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--grid); }
+.list li:first-child { border-top: 0; }
+.head { width: 24px; height: 24px; border-radius: 4px; background: var(--chip); flex: none; image-rendering: pixelated; }
+.name { font-weight: 600; }
+.right { margin-left: auto; color: var(--text-2); font-size: 13px; text-align: right; white-space: nowrap; }
+.empty { color: var(--muted); padding: 8px 0; }
+.tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--text-2); font-weight: 600; }
+.tag.on { background: var(--good-bg); color: var(--good); }
+.chart-wrap { position: relative; }
+svg { display: block; width: 100%; overflow: visible; }
+.axis text { fill: var(--muted); font-size: 11px; }
+.axis line { stroke: var(--grid); }
+.bar { fill: var(--bar); }
+.hit:hover + .bar, .bar.hover { fill: var(--bar-hover); }
+.tip { position: absolute; pointer-events: none; background: var(--text); color: var(--surface); padding: 6px 9px;
+  border-radius: 6px; font-size: 12px; max-width: 240px; transform: translate(-50%, -100%); display: none; z-index: 2; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.filters button { border: 1px solid var(--border); background: var(--surface); color: var(--text-2); font: inherit;
+  font-size: 13px; padding: 3px 10px; border-radius: 99px; cursor: pointer; }
+.filters button[aria-pressed="true"] { background: var(--text); color: var(--surface); border-color: var(--text); }
+.feed { max-height: 420px; overflow-y: auto; }
+.feed li { align-items: flex-start; }
+.ev-icon { width: 22px; flex: none; text-align: center; }
+.ev-text { min-width: 0; overflow-wrap: anywhere; }
+.ev-time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; padding-left: 8px; }
+.ev-day { color: var(--muted); font-size: 12px; font-weight: 600; padding: 10px 0 2px !important; border-top: 0 !important; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 7px 10px; text-align: right; border-top: 1px solid var(--grid); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--text-2); font-size: 12px; font-weight: 600; border-top: 0; cursor: pointer; user-select: none; }
+th[aria-sort]::after { content: " ↓"; } th[aria-sort="ascending"]::after { content: " ↑"; }
+td .who { display: inline-flex; align-items: center; gap: 8px; }
+.err { background: var(--bad-bg); color: var(--bad); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Survival Server</h1>
+    <span id="status" class="status down"><span class="dot"></span><span>Loading…</span></span>
+    <span class="meta" id="meta"></span>
+  </header>
+  <div class="err" id="err"></div>
+
+  <section class="tiles" id="tiles"></section>
+
+  <div class="grid2">
+    <section class="card"><h2 id="online-title">Online now</h2><ul class="list" id="online"></ul></section>
+    <section class="card"><h2>Recent players</h2><ul class="list" id="recent"></ul></section>
+  </div>
+
+  <section class="card" style="margin-bottom:12px">
+    <h2>Hours played per day <span style="color:var(--muted);font-weight:400">· last 30 days, all players</span></h2>
+    <div class="chart-wrap" id="chart-wrap"><svg id="chart" height="190"></svg><div class="tip" id="tip"></div></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Activity</h2>
+      <div class="filters" id="filters"></div>
+      <ul class="list feed" id="feed"></ul>
+    </section>
+    <section class="card"><h2>Server</h2><ul class="list" id="machine"></ul></section>
+  </div>
+
+  <section class="card">
+    <h2>All players <span id="pcount" style="color:var(--muted);font-weight:400"></span></h2>
+    <div class="table-wrap"><table id="players"><thead><tr></tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num = n => Number(n || 0).toLocaleString();
+const bytes = b => b == null ? "–" : b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : (b / 1e6).toFixed(0) + " MB";
+const dur = s => { s = Math.max(0, s || 0); const d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24, m = Math.floor(s / 60) % 60;
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m` : "<1m"; };
+const hours = ticks => (ticks / 72000).toFixed(1) + " h";
+const km = cm => cm >= 100000 ? (cm / 100000).toFixed(1) + " km" : Math.round(cm / 100) + " m";
+function ago(t) {
+  if (!t) return "–";
+  const s = Date.now() / 1000 - t;
+  if (s < 90) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  if (s < 86400 * 14) { const n = Math.round(s / 86400); return n === 1 ? "yesterday" : n + " days ago"; }
+  return new Date(t * 1000).toLocaleDateString(undefined, {day: "numeric", month: "short"});
+}
+const clock = t => new Date(t * 1000).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"});
+function head(p) {
+  // Bedrock players have no Java skin, so only Java UUIDs get a face
+  return p && !p.bedrock ? `<img class="head" alt="" loading="lazy" src="https://mc-heads.net/avatar/${p.uuid}/24" onerror="this.style.visibility='hidden'">`
+    : `<span class="head"></span>`;
+}
+
+let data = null, filter = "all", sortKey = "last_seen", sortAsc = false;
+
+function render() {
+  const d = data, s = d.server, byName = Object.fromEntries(d.players.map(p => [p.name, p]));
+  const st = $("status");
+  st.className = "status " + (s.up ? "up" : "down");
+  st.lastElementChild.textContent = s.up ? `Online · ${s.version || ""}` : "Offline";
+  $("meta").textContent = "Updated " + clock(d.generated);
+
+  const total = d.players.reduce((a, p) => a + p.play_ticks, 0);
+  const tiles = [
+    ["Players online", s.up ? `${s.online} / ${s.max}` : "–", s.up && s.since ? "up for " + dur(d.generated - s.since) : ""],
+    ["Players this week", d.week.players, d.week.new ? `${d.week.new} new` : "no new players"],
+    ["Hours played this week", d.week.hours, ""],
+    ["Deaths this week", d.week.deaths, ""],
+    ["Advancements this week", d.week.advancements, ""],
+    ["All players", d.players.length, hours(total) + " played in total"],
+  ];
+  $("tiles").innerHTML = tiles.map(([l, v, sub]) =>
+    `<div class="card tile"><div class="label">${l}</div><div class="value">${esc(v)}</div><div class="sub">${esc(sub)}</div></div>`).join("");
+
+  const online = d.players.filter(p => p.online).sort((a, b) => (a.online_since || 0) - (b.online_since || 0));
+  $("online-title").textContent = `Online now (${s.up ? s.online : 0})`;
+  $("online").innerHTML = online.length ? online.map(p =>
+    `<li>${head(p)}<span class="name">${esc(p.name)}</span>${p.op ? ' <span class="tag">op</span>' : ""}
+     <span class="right">${p.online_since ? "on for " + dur(d.generated - p.online_since) : ""}</span></li>`).join("")
+    : `<li class="empty">${s.up ? "Nobody's on right now." : "The server is offline."}</li>`;
+
+  const recent = d.players.filter(p => p.last_seen).sort((a, b) => b.last_seen - a.last_seen).slice(0, 8);
+  $("recent").innerHTML = recent.map(p =>
+    `<li>${head(p)}<span class="name">${esc(p.name)}</span>${p.online ? ' <span class="tag on">online</span>' : ""}
+     <span class="right">${p.online ? "now" : ago(p.last_seen)}<br><span style="color:var(--muted);font-size:12px">${
+       p.last_session ? "last session " + dur(p.last_session) : ""}</span></span></li>`).join("") || `<li class="empty">No one yet.</li>`;
+
+  renderChart();
+  renderFeed(byName);
+  renderMachine();
+  renderTable();
+}
+
+function renderChart() {
+  const svg = $("chart"), days = data.daily, W = svg.clientWidth || 600, H = 190, L = 34, B = 22, T = 8;
+  const max = Math.max(1, ...days.map(d => d.hours));
+  const step = max <= 4 ? 1 : max <= 10 ? 2 : max <= 25 ? 5 : 10, top = Math.ceil(max / step) * step;
+  const y = v => T + (H - T - B) * (1 - v / top), bw = (W - L) / days.length, gap = Math.min(4, bw * 0.25);
+  let g = '<g class="axis">';
+  for (let v = 0; v <= top; v += step) g += `<line x1="${L}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  days.forEach((d, i) => { if (i % 5 === (days.length - 1) % 5) {
+    const dd = new Date(d.date + "T12:00");
+    g += `<text x="${L + i * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${dd.toLocaleDateString(undefined, {day: "numeric", month: "short"})}</text>`; } });
+  g += "</g>";
+  days.forEach((d, i) => {
+    const x = L + i * bw + gap / 2, w = bw - gap, h = y(0) - y(d.hours), r = Math.min(4, w / 2, h);
+    g += `<rect class="hit" data-i="${i}" x="${L + i * bw}" y="${T}" width="${bw}" height="${H - T - B}" fill="transparent"/>`;
+    g += d.hours > 0 ? `<path class="bar" data-i="${i}" d="M${x},${y(0)} V${y(d.hours) + r} q0,-${r} ${r},-${r} H${x + w - r} q${r},0 ${r},${r} V${y(0)} Z"/>` : "<g></g>";
+  });
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = g;
+  const tip = $("tip");
+  svg.querySelectorAll(".hit").forEach(el => {
+    el.addEventListener("mouseenter", () => {
+      const d = days[+el.dataset.i], dd = new Date(d.date + "T12:00");
+      tip.innerHTML = `<b>${dd.toLocaleDateString(undefined, {weekday: "short", day: "numeric", month: "short"})}</b><br>${d.hours.toFixed(1)} h played` +
+        (d.players.length ? `<br>${d.players.map(esc).join(", ")}` : "<br>nobody played");
+      const x = (+el.getAttribute("x") + bw / 2) / W * svg.clientWidth;
+      tip.style.left = Math.min(Math.max(x, 90), svg.clientWidth - 90) + "px";
+      tip.style.top = (y(d.hours) / H * svg.clientHeight - 6) + "px";
+      tip.style.display = "block";
+    });
+    el.addEventListener("mouseleave", () => tip.style.display = "none");
+  });
+}
+
+const ICONS = {join: "🟢", leave: "⚪", death: "💀", advancement: "🏆", chat: "💬", server: "🖥️"};
+const KINDS = [["all", "All"], ["players", "Joins & leaves"], ["death", "Deaths"], ["advancement", "Advancements"], ["chat", "Chat"], ["server", "Server"]];
+function renderFeed(byName) {
+  $("filters").innerHTML = KINDS.map(([k, l]) => `<button data-k="${k}" aria-pressed="${k === filter}">${l}</button>`).join("");
+  $("filters").querySelectorAll("button").forEach(b => b.onclick = () => { filter = b.dataset.k; renderFeed(byName); });
+  const ok = e => filter === "all" || e.type === filter || (filter === "players" && (e.type === "join" || e.type === "leave"));
+  let html = "", lastDay = "";
+  for (const e of data.events.filter(ok).slice(0, 120)) {
+    const day = new Date(e.t * 1000).toLocaleDateString(undefined, {weekday: "long", day: "numeric", month: "short"});
+    if (day !== lastDay) { html += `<li class="ev-day">${day}</li>`; lastDay = day; }
+    const text = e.type === "chat" ? `<span class="name">${esc(e.name)}</span>: ${esc(e.text)}`
+      : e.type === "advancement" ? `<span class="name">${esc(e.name)}</span> got <b>${esc(e.text)}</b>`
+      : e.type === "server" ? esc(e.text)
+      : `<span class="name">${esc(e.name)}</span> ${esc(e.text)}`;
+    html += `<li><span class="ev-icon">${ICONS[e.type]}</span><span class="ev-text">${text}</span><span class="ev-time">${clock(e.t)}</span></li>`;
+  }
+  $("feed").innerHTML = html || `<li class="empty">Nothing yet.</li>`;
+}
+
+function renderMachine() {
+  const m = data.machine, s = data.server;
+  const rows = [
+    ["Status", s.up ? `Online, up for ${s.since ? dur(data.generated - s.since) : "?"}` : "Offline"],
+    ["Version", s.version || "–"],
+    ["Server memory", m.mem_rss ? bytes(m.mem_rss) + " used (4 GB max)" : "–"],
+    ["Machine RAM", m.ram_total ? `${bytes(m.ram_total - m.ram_free)} of ${bytes(m.ram_total)}` : "–"],
+    ["CPU load", m.load != null ? `${m.load.toFixed(2)} (${m.cpus} cores)` : "–"],
+    ["World size", bytes(m.world_bytes)],
+    ["Disk free", m.disk_free ? `${bytes(m.disk_free)} of ${bytes(m.disk_total)}` : "–"],
+    ["World download refreshed", m.world_zip_time ? ago(m.world_zip_time) : "–"],
+  ];
+  $("machine").innerHTML = rows.map(([k, v]) => `<li><span style="color:var(--text-2)">${k}</span><span class="right">${esc(v)}</span></li>`).join("");
+}
+
+const COLS = [
+  ["name", "Player"], ["last_seen", "Last seen"], ["first_seen", "First joined"], ["play_ticks", "Played"],
+  ["week_secs", "This week"], ["sessions", "Sessions"], ["deaths", "Deaths"], ["mob_kills", "Mobs killed"],
+  ["blocks_mined", "Blocks mined"], ["distance_cm", "Distance"], ["advancements", "Advancements"],
+];
+function renderTable() {
+  const ps = [...data.players].sort((a, b) => {
+    const x = a[sortKey] ?? -1, y = b[sortKey] ?? -1;
+    const c = typeof x === "string" ? x.localeCompare(y, undefined, {sensitivity: "base"}) : x - y;
+    return sortAsc ? c : -c;
+  });
+  $("pcount").textContent = "· " + ps.length;
+  const tr = $("players").tHead.rows[0];
+  tr.innerHTML = COLS.map(([k, l]) => `<th data-k="${k}"${k === sortKey ? ` aria-sort="${sortAsc ? "ascending" : "descending"}"` : ""}>${l}</th>`).join("");
+  tr.querySelectorAll("th").forEach(th => th.onclick = () => {
+    if (sortKey === th.dataset.k) sortAsc = !sortAsc; else { sortKey = th.dataset.k; sortAsc = sortKey === "name"; }
+    renderTable();
+  });
+  $("players").tBodies[0].innerHTML = ps.map(p => `<tr>
+    <td><span class="who">${head(p)}<span class="name">${esc(p.name)}</span>${p.online ? '<span class="tag on">online</span>' : ""}${
+      p.op ? '<span class="tag">op</span>' : ""}${p.bedrock ? '<span class="tag">bedrock</span>' : ""}${p.banned ? '<span class="tag">banned</span>' : ""}</span></td>
+    <td>${p.online ? "now" : ago(p.last_seen)}</td>
+    <td>${p.first_seen ? new Date(p.first_seen * 1000).toLocaleDateString(undefined, {day: "numeric", month: "short"}) : "–"}</td>
+    <td>${hours(p.play_ticks)}</td><td>${p.week_secs ? dur(p.week_secs) : "–"}</td><td>${num(p.sessions)}</td>
+    <td>${num(p.deaths)}</td><td>${num(p.mob_kills)}</td><td>${num(p.blocks_mined)}</td><td>${km(p.distance_cm)}</td><td>${num(p.advancements)}</td>
+  </tr>`).join("");
+}
+
+async function load() {
+  try {
+    const r = await fetch("/api/status", {cache: "no-store"});
+    if (!r.ok) throw new Error(r.status + " " + r.statusText);
+    data = await r.json();
+    $("err").style.display = "none";
+    render();
+  } catch (e) {
+    $("err").textContent = "Couldn't load server data (" + e.message + "). Retrying…";
+    $("err").style.display = "block";
+  }
+}
+load();
+setInterval(load, 15000);
+let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => data && renderChart(), 150); });
+</script>
+</body>
+</html>
+"""
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8200)
+    ap.add_argument("--dump", action="store_true")
+    a = ap.parse_args()
+    if a.dump:
+        json.dump(snapshot(), sys.stdout, indent=1); print()
+        return
+    srv = Server(("::", a.port), Handler)
+    print(f"dashboard on port {a.port}", flush=True)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
