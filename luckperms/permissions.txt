@@ -10,6 +10,7 @@ group admin: worldguard.region.bypass.world_the_end = false
 group default: essentials.back = true
 group default: essentials.back.ondeath = true
 group default: essentials.delhome = true
+group default: essentials.discord.receive.primary = true
 group default: essentials.home = true
 group default: essentials.sethome = true
 group default: essentials.spawn = true
