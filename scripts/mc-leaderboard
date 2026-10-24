@@ -2,8 +2,9 @@
 """Post a daily leaderboard for one random stat category to Discord.
 
 Reads vanilla player stats (world/players/stats) and XP (world/players/data), ranks
-what each player gained since the previous run, and posts the top 5 with the bot.
-The first run (no saved totals yet) posts all-time totals instead.
+what each player gained over the last 7 days, and posts the top 5 with the bot.
+Totals are saved on every run; until a week of them exists it ranks gains since the
+oldest saved run, and the first run (nothing saved yet) posts all-time totals.
 
   mc-leaderboard                  pick a category, post, save totals
   mc-leaderboard --dry-run        print the message; post and save nothing
@@ -19,6 +20,7 @@ WORLD = f"{LIVE}/world"
 STATE = "/var/lib/mc-leaderboard/state.json"
 TOP = 5
 RECENT = 4  # don't repeat any of the last N categories
+WEEK = 7 * 86400
 
 
 # --- Stats -------------------------------------------------------------------
@@ -195,18 +197,24 @@ def main():
         state = json.load(open(a.state))
     except (OSError, ValueError):
         state = {}
+    if "totals" in state:  # older state kept a single run's totals
+        state["history"] = [{"time": state.pop("time", 0), "totals": state.pop("totals")}]
+    history = state.get("history", [])
+    now = time.time()
     totals = collect()
-    before = state.get("totals")
-    scores = gains(totals, before)
+    # Compare with the run closest to a week ago (timer jitter: anything over 6.5 days counts)
+    old = [h for h in history if now - h["time"] >= WEEK - 12 * 3600]
+    base = max(old, key=lambda h: h["time"]) if old else min(history, key=lambda h: h["time"], default=None)
+    scores = gains(totals, base and base["totals"])
 
-    if before is None:
+    if base is None:
         period = "All-time totals (first leaderboard)"
     else:
-        h = round((time.time() - state.get("time", 0)) / 3600)
-        period = "Last 24 hours" if 20 <= h <= 28 else f"Last {h} hours"
+        days = round((now - base["time"]) / 86400)
+        period = "Last 7 days" if days == 7 else "Last 24 hours" if days <= 1 else f"Last {days} days"
     cat = choose(scores, state.get("recent", []), a.category)
     if cat is None:  # nobody played: show all-time instead
-        scores, period = totals, "Quiet day, so here are the all-time totals"
+        scores, period = totals, "Quiet week, so here are the all-time totals"
         cat = choose(scores, state.get("recent", []), None)
     if cat is None:
         print("no stats yet"); return
@@ -216,7 +224,9 @@ def main():
         print(embed["title"]); print(embed["description"]); print(embed["footer"]["text"])
         return
     post(embed)
-    state = {"time": time.time(), "totals": totals, "recent": ([cat] + state.get("recent", []))[:RECENT]}
+    # Keep a day's slack past a week so there's always a run to compare with
+    history = [h for h in history if now - h["time"] <= WEEK + 86400] + [{"time": now, "totals": totals}]
+    state = {"history": history, "recent": ([cat] + state.get("recent", []))[:RECENT]}
     os.makedirs(os.path.dirname(a.state), exist_ok=True)
     tmp = a.state + ".tmp"
     json.dump(state, open(tmp, "w")); os.replace(tmp, a.state)

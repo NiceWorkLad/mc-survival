@@ -89,13 +89,13 @@ One-time setup on the server:
 ## Discord
 
 - **Chat bridge + feed**: EssentialsX Discord (`plugins/EssentialsDiscord/config.yml`). Chat both ways,
-  plus joins, leaves, deaths, advancements and server start/stop, in channel `1555728561825120286`.
+  plus joins, leaves, deaths, advancements and server start/stop, in channel `1563673107414122586`.
   Player messages are posted under the player's name and head (needs the bot's Manage Webhooks permission).
   Running console commands from Discord (`/execute`) is turned off.
 - **Daily leaderboard**: `scripts/mc-leaderboard`, run by `mc-leaderboard.timer` at 19:00 UK time.
   Picks a random category (diamonds, distance, XP, animals bred, ...; `mc-leaderboard --list`), ranks
-  what players gained since the previous post and posts the top 5 with the bot. Totals between runs are
-  kept in `/var/lib/mc-leaderboard/state.json`; the first run posts all-time totals.
+  what players gained over the last 7 days and posts the top 5 with the bot. Each run's totals are
+  kept for 8 days in `/var/lib/mc-leaderboard/state.json`; the first run posts all-time totals.
   Preview without posting: `sudo -u minecraft mc-leaderboard --dry-run [--category xp]`.
 - The bot token is `DISCORD_BOT_TOKEN` in `/opt/minecraft/secrets.env`. It can't be generated, so
   `mc-deploy` stops until it's there. To set or replace it:

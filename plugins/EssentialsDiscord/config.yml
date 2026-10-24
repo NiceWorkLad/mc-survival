@@ -15,7 +15,7 @@
 token: ${DISCORD_BOT_TOKEN}
 
 # The ID of your server.
-guild: 1552368174664646786
+guild: 1562950545977770096
 
 # The Discord invite URL that will be shown when a player when using the /discord command or in other areas.
 discord-url: "https://discord.gg/invite-code"
@@ -38,7 +38,7 @@ discord-url: "https://discord.gg/invite-code"
 # - staff, which will send kick/mute messages
 # (note: you will need to replace the zeros with the actual channel ID you want to use)
 channels:
-  primary: 1555728561825120286
+  primary: 1563673107414122586
   staff: 000000000000000000
 
 # Should all players receive Discord messages from the primary channel, regardless of their permissions?

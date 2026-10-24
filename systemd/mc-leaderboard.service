@@ -9,6 +9,6 @@ Type=oneshot
 User=minecraft
 ExecStart=/usr/local/bin/mc-leaderboard
 EnvironmentFile=/opt/minecraft/secrets.env
-Environment=LEADERBOARD_CHANNEL=1561032763841187840
-# Yesterday's totals, to rank today's gains (/var/lib/mc-leaderboard/state.json)
+Environment=LEADERBOARD_CHANNEL=1562950547298852929
+# The last 8 days of totals, to rank the week's gains (/var/lib/mc-leaderboard/state.json)
 StateDirectory=mc-leaderboard
