@@ -277,7 +277,7 @@ messages:
   # - {role}: The name of the user's topmost role on Discord. If the user doesn't have a role, the placeholder is empty.
   # - {color}: The minecraft color representative of the user's topmost role color on Discord. If the user doesn't have a role color, the placeholder is empty.
   # - {message}: The content of the message being sent
-  discord-to-mc: "&6[#{channel}] &3{fullname}&7: &f{message}"
+  discord-to-mc: "&3{nickname}&7: &f{message}"
   # This is the message that is used to relay minecraft chat in Discord.
   # The following placeholders can be used here:
   # - {username}: The username of the player sending the message
