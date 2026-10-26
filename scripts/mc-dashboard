@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Home-network dashboard for the survival server: who's online, recent players,
-every player's stats, and an activity feed (joins, deaths, advancements, chat).
+every player's stats, and an activity feed (joins, deaths, advancements, in-game and Discord chat).
 
 Everything comes from files the server already writes (logs/, usercache.json,
 world/players/stats, Essentials userdata) plus a status ping to 127.0.0.1:25565,
@@ -67,6 +67,10 @@ JOIN = re.compile(r"^(\S+) joined the game$")
 LEAVE = re.compile(r"^(\S+) left the game$")
 ADV = re.compile(r"^(\S+) has (?:made the advancement|completed the challenge|reached the goal) \[(.+)\]$")
 CHAT = re.compile(r"^(?:\[Not Secure\] )?<([^>\s]+)> (.*)$")
+# Discord chat, logged by EssentialsDiscord's relay-to-console in its discord-to-mc format
+# ("{nickname}: {message}"). Discord nicknames are at most 32 characters.
+DISCORD = re.compile(r"^\[EssentialsDiscord\] (.{1,32}?): (.+)$")
+MCCODE = re.compile(r"§[0-9a-fk-orx]", re.I)
 DEATH = re.compile(r"^(\S+) (was |died|drowned|blew up|burned|fell |hit the ground|went up in flames|walked into|"
                    r"tried to swim|experienced kinetic|froze|starved|suffocated|withered|discovered the floor|"
                    r"didn't want to live|left the confines|went off with)")
@@ -109,9 +113,12 @@ def parse_log(path, base, backwards):
 def classify(thread, msg):
     if thread.startswith("Async Chat Thread"):
         if m := CHAT.match(msg):
-            return {"type": "chat", "name": m[1], "text": m[2]}
+            return {"type": "chat", "src": "game", "name": m[1], "text": m[2]}
         return None
     if thread != "Server thread":
+        # The relay runs on a JDA thread; plugin startup lines are on the server thread
+        if m := DISCORD.match(MCCODE.sub("", msg)):
+            return {"type": "chat", "src": "discord", "name": m[1], "text": m[2]}
         return None
     if m := JOIN.match(msg):
         return {"type": "join", "name": m[1], "text": "joined"}
@@ -391,109 +398,169 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Survival Server Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400,1,0&display=block">
 <style>
 :root {
   color-scheme: light;
-  --bg: #f4f3ef; --surface: #fcfcfb; --border: #e3e1da; --grid: #ebe9e3;
-  --text: #0b0b0b; --text-2: #52514e; --muted: #85837d;
-  --accent: #2a78d6; --bar: #2a78d6; --bar-hover: #1c5fae;
-  --good: #008300; --good-bg: #e2f2e2; --bad: #c62f2e; --bad-bg: #fbe6e5;
-  --gold: #a86f00; --gold-bg: #fbf0d6; --chip: #ecebe6;
+  --bg: #f1f3f4; --surface: #ffffff; --border: #dadce0; --grid: #eceef0;
+  --text: #202124; --text-2: #5f6368; --muted: #80868b; --chip: #f1f3f4;
+  --shadow: 0 1px 2px rgba(60,64,67,.3), 0 1px 3px 1px rgba(60,64,67,.15);
+  --blue: #1a73e8; --blue-2: #1557b0; --blue-bg: #e8f0fe;
+  --green: #1e8e3e; --green-bar: #34a853; --green-2: #188038; --green-bg: #e6f4ea;
+  --red: #d93025; --red-bg: #fce8e6; --yellow: #e37400; --yellow-bg: #fef7e0;
+  --teal: #129eaf; --teal-bg: #e4f7fb; --purple: #9334e6; --purple-bg: #f3e8fd;
+  --discord: #5865f2; --discord-bg: #eceefe; --track: #e8eaed;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #121211; --surface: #1a1a19; --border: #2d2d2b; --grid: #262624;
-    --text: #f0efec; --text-2: #c3c2b7; --muted: #8e8d86;
-    --accent: #5a9cec; --bar: #3987e5; --bar-hover: #7fb2f0;
-    --good: #4cc04c; --good-bg: #183218; --bad: #ef7d7c; --bad-bg: #3a1c1c;
-    --gold: #e0a93a; --gold-bg: #33290f; --chip: #262624;
+    --bg: #1b1b1d; --surface: #28292c; --border: #3c4043; --grid: #35363a;
+    --text: #e8eaed; --text-2: #bdc1c6; --muted: #9aa0a6; --chip: #35363a;
+    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 1px 3px 1px rgba(0,0,0,.3);
+    --blue: #8ab4f8; --blue-2: #aecbfa; --blue-bg: #283a55;
+    --green: #81c995; --green-bar: #81c995; --green-2: #a8dab5; --green-bg: #24392a;
+    --red: #f28b82; --red-bg: #46282a; --yellow: #fdd663; --yellow-bg: #42391c;
+    --teal: #78d9ec; --teal-bg: #1f3b40; --purple: #d7aefb; --purple-bg: #3b2a4d;
+    --discord: #a5acff; --discord-bg: #30335a; --track: #3c4043;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #121211; --surface: #1a1a19; --border: #2d2d2b; --grid: #262624;
-  --text: #f0efec; --text-2: #c3c2b7; --muted: #8e8d86;
-  --accent: #5a9cec; --bar: #3987e5; --bar-hover: #7fb2f0;
-  --good: #4cc04c; --good-bg: #183218; --bad: #ef7d7c; --bad-bg: #3a1c1c;
-  --gold: #e0a93a; --gold-bg: #33290f; --chip: #262624;
+  --bg: #1b1b1d; --surface: #28292c; --border: #3c4043; --grid: #35363a;
+  --text: #e8eaed; --text-2: #bdc1c6; --muted: #9aa0a6; --chip: #35363a;
+  --shadow: 0 1px 2px rgba(0,0,0,.5), 0 1px 3px 1px rgba(0,0,0,.3);
+  --blue: #8ab4f8; --blue-2: #aecbfa; --blue-bg: #283a55;
+  --green: #81c995; --green-bar: #81c995; --green-2: #a8dab5; --green-bg: #24392a;
+  --red: #f28b82; --red-bg: #46282a; --yellow: #fdd663; --yellow-bg: #42391c;
+  --teal: #78d9ec; --teal-bg: #1f3b40; --purple: #d7aefb; --purple-bg: #3b2a4d;
+  --discord: #a5acff; --discord-bg: #30335a; --track: #3c4043;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
-  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-h1 { font-size: 20px; margin: 0; }
-h2 { font-size: 15px; margin: 0 0 12px; }
-.status { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 99px;
-  font-size: 13px; font-weight: 600; }
-.status.up { background: var(--good-bg); color: var(--good); }
-.status.down { background: var(--bad-bg); color: var(--bad); }
+  font: 14px/1.45 Roboto, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+.ms { font-family: "Material Symbols Rounded"; font-weight: normal; font-style: normal; font-size: 20px; line-height: 1;
+  letter-spacing: normal; white-space: nowrap; direction: ltr; -webkit-font-smoothing: antialiased; user-select: none; }
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+.logo { width: 40px; height: 40px; border-radius: 50%; background: var(--green-bg); color: var(--green);
+  display: grid; place-items: center; }
+.logo .ms { font-size: 24px; }
+h1 { font-size: 22px; font-weight: 400; margin: 0; }
+h2 { font-size: 16px; font-weight: 500; margin: 0 0 14px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+h2 .hint { color: var(--muted); font-weight: 400; font-size: 13px; }
+.status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 99px; font-size: 13px; font-weight: 500; }
+.status.up { background: var(--green-bg); color: var(--green); }
+.status.down { background: var(--red-bg); color: var(--red); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-.meta { color: var(--muted); font-size: 13px; margin-left: auto; }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 12px; }
-.tile .label { color: var(--text-2); font-size: 12px; }
-.tile .value { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.meta { color: var(--text-2); font-size: 13px; margin-left: auto; font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; gap: 6px; }
+.meta .ms { font-size: 16px; color: var(--muted); }
+.card { background: var(--surface); border-radius: 16px; padding: 20px; min-width: 0; box-shadow: var(--shadow); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .card { box-shadow: none; border: 1px solid var(--border); } }
+:root[data-theme="dark"] .card { box-shadow: none; border: 1px solid var(--border); }
+.gap { margin-bottom: 16px; }
+
+/* Hero: rings + summary tiles */
+.hero { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }
+@media (max-width: 860px) { .hero { grid-template-columns: 1fr; } }
+.rings { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.rings svg { width: 180px; height: 180px; }
+.ring-track { fill: none; stroke: var(--track); }
+.ring { fill: none; stroke-linecap: round; transition: stroke-dashoffset .6s ease; }
+.ring-center { font-size: 40px; font-weight: 500; fill: var(--text); }
+.ring-sub { font-size: 12px; fill: var(--text-2); }
+.ring-stats { display: flex; gap: 32px; margin-top: 14px; text-align: center; }
+.ring-stats .v { font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.ring-stats .l { font-size: 12px; color: var(--text-2); }
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1000px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tile { display: flex; flex-direction: column; gap: 10px; }
+.icon { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none; }
+.tile .label { color: var(--text-2); font-size: 13px; }
+.tile .value { font-size: 28px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .tile .sub { color: var(--muted); font-size: 12px; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.c-blue { background: var(--blue-bg); color: var(--blue); } .c-green { background: var(--green-bg); color: var(--green); }
+.c-red { background: var(--red-bg); color: var(--red); } .c-yellow { background: var(--yellow-bg); color: var(--yellow); }
+.c-teal { background: var(--teal-bg); color: var(--teal); } .c-purple { background: var(--purple-bg); color: var(--purple); }
+.c-grey { background: var(--chip); color: var(--text-2); } .c-discord { background: var(--discord-bg); color: var(--discord); }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
 @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
 .list { list-style: none; margin: 0; padding: 0; }
-.list li { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--grid); }
+.list li { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--grid); }
 .list li:first-child { border-top: 0; }
-.head { width: 24px; height: 24px; border-radius: 4px; background: var(--chip); flex: none; image-rendering: pixelated; }
-.name { font-weight: 600; }
+.head { width: 28px; height: 28px; border-radius: 50%; background: var(--chip); flex: none; image-rendering: pixelated; }
+.name { font-weight: 500; }
 .right { margin-left: auto; color: var(--text-2); font-size: 13px; text-align: right; white-space: nowrap; }
 .empty { color: var(--muted); padding: 8px 0; }
-.tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--text-2); font-weight: 600; }
-.tag.on { background: var(--good-bg); color: var(--good); }
+.tag { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--chip); color: var(--text-2); font-weight: 500; }
+.tag.on { background: var(--green-bg); color: var(--green); }
+.tag.dc { background: var(--discord-bg); color: var(--discord); }
+
+/* Chart */
+.legend { margin-left: auto; display: inline-flex; gap: 14px; font-size: 12px; color: var(--text-2); font-weight: 400; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 .chart-wrap { position: relative; }
-svg { display: block; width: 100%; overflow: visible; }
+svg { display: block; overflow: visible; }
+#chart { width: 100%; }
 .axis text { fill: var(--muted); font-size: 11px; }
 .axis line { stroke: var(--grid); }
-.bar { fill: var(--bar); }
-.hit:hover + .bar, .bar.hover { fill: var(--bar-hover); }
-.tip { position: absolute; pointer-events: none; background: var(--text); color: var(--surface); padding: 6px 9px;
-  border-radius: 6px; font-size: 12px; max-width: 240px; transform: translate(-50%, -100%); display: none; z-index: 2; }
-.filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.axis text.we { fill: var(--green); }
+.bar { fill: var(--blue); } .bar.we { fill: var(--green-bar); }
+.hit:hover + .bar { fill: var(--blue-2); } .hit:hover + .bar.we { fill: var(--green-2); }
+.val { fill: var(--text-2); font-size: 10.5px; font-weight: 500; font-variant-numeric: tabular-nums; pointer-events: none; }
+.tip { position: absolute; pointer-events: none; background: var(--text); color: var(--surface); padding: 8px 10px;
+  border-radius: 8px; font-size: 12px; max-width: 240px; transform: translate(-50%, -100%); display: none; z-index: 2; }
+
+/* Feed */
+.filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .filters button { border: 1px solid var(--border); background: var(--surface); color: var(--text-2); font: inherit;
-  font-size: 13px; padding: 3px 10px; border-radius: 99px; cursor: pointer; }
-.filters button[aria-pressed="true"] { background: var(--text); color: var(--surface); border-color: var(--text); }
-.feed { max-height: 420px; overflow-y: auto; }
+  font-size: 13px; font-weight: 500; padding: 5px 12px; border-radius: 8px; cursor: pointer; }
+.filters button[aria-pressed="true"] { background: var(--blue-bg); color: var(--blue); border-color: transparent; }
+.feed { max-height: 460px; overflow-y: auto; }
 .feed li { align-items: flex-start; }
-.ev-icon { width: 22px; flex: none; text-align: center; }
-.ev-text { min-width: 0; overflow-wrap: anywhere; }
-.ev-time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; padding-left: 8px; }
-.ev-day { color: var(--muted); font-size: 12px; font-weight: 600; padding: 10px 0 2px !important; border-top: 0 !important; }
+.feed .icon { width: 30px; height: 30px; } .feed .icon .ms { font-size: 17px; }
+.ev-text { min-width: 0; overflow-wrap: anywhere; padding-top: 5px; }
+.ev-time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; padding: 6px 0 0 8px; }
+.ev-day { color: var(--text-2); font-size: 12px; font-weight: 500; padding: 12px 0 2px !important; border-top: 0 !important; }
+
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th, td { padding: 7px 10px; text-align: right; border-top: 1px solid var(--grid); white-space: nowrap; }
+th, td { padding: 9px 10px; text-align: right; border-top: 1px solid var(--grid); white-space: nowrap; }
 th:first-child, td:first-child { text-align: left; }
-th { color: var(--text-2); font-size: 12px; font-weight: 600; border-top: 0; cursor: pointer; user-select: none; }
+th { color: var(--text-2); font-size: 12px; font-weight: 500; border-top: 0; cursor: pointer; user-select: none; }
+th[aria-sort] { color: var(--blue); }
 th[aria-sort]::after { content: " ↓"; } th[aria-sort="ascending"]::after { content: " ↑"; }
 td .who { display: inline-flex; align-items: center; gap: 8px; }
-.err { background: var(--bad-bg); color: var(--bad); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; display: none; }
+.err { background: var(--red-bg); color: var(--red); padding: 10px 14px; border-radius: 12px; margin-bottom: 16px; display: none; }
 </style>
 </head>
 <body>
 <main>
   <header>
+    <span class="logo"><span class="ms">landscape</span></span>
     <h1>Survival Server</h1>
     <span id="status" class="status down"><span class="dot"></span><span>Loading…</span></span>
-    <span class="meta" id="meta"></span>
+    <span class="meta"><span class="ms">schedule</span><span id="meta"></span></span>
   </header>
   <div class="err" id="err"></div>
 
-  <section class="tiles" id="tiles"></section>
+  <div class="hero">
+    <section class="card rings" id="rings"></section>
+    <section class="tiles" id="tiles"></section>
+  </div>
 
   <div class="grid2">
     <section class="card"><h2 id="online-title">Online now</h2><ul class="list" id="online"></ul></section>
     <section class="card"><h2>Recent players</h2><ul class="list" id="recent"></ul></section>
   </div>
 
-  <section class="card" style="margin-bottom:12px">
-    <h2>Hours played per day <span style="color:var(--muted);font-weight:400">· last 30 days, all players</span></h2>
-    <div class="chart-wrap" id="chart-wrap"><svg id="chart" height="190"></svg><div class="tip" id="tip"></div></div>
+  <section class="card gap">
+    <h2>Hours played per day <span class="hint">last 30 days, all players</span>
+      <span class="legend"><span><i style="background:var(--blue)"></i>Weekday</span><span><i style="background:var(--green-bar)"></i>Weekend</span></span></h2>
+    <div class="chart-wrap" id="chart-wrap"><svg id="chart" height="230"></svg><div class="tip" id="tip"></div></div>
   </section>
 
   <div class="grid2">
@@ -506,7 +573,7 @@ td .who { display: inline-flex; align-items: center; gap: 8px; }
   </div>
 
   <section class="card">
-    <h2>All players <span id="pcount" style="color:var(--muted);font-weight:400"></span></h2>
+    <h2>All players <span id="pcount" class="hint"></span></h2>
     <div class="table-wrap"><table id="players"><thead><tr></tr></thead><tbody></tbody></table></div>
   </section>
 </main>
@@ -519,6 +586,7 @@ const dur = s => { s = Math.max(0, s || 0); const d = Math.floor(s / 86400), h =
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m` : "<1m"; };
 const hours = ticks => (ticks / 72000).toFixed(1) + " h";
 const km = cm => cm >= 100000 ? (cm / 100000).toFixed(1) + " km" : Math.round(cm / 100) + " m";
+const icon = (name, color) => `<span class="icon c-${color}"><span class="ms">${name}</span></span>`;
 function ago(t) {
   if (!t) return "–";
   const s = Date.now() / 1000 - t;
@@ -529,32 +597,41 @@ function ago(t) {
   return new Date(t * 1000).toLocaleDateString(undefined, {day: "numeric", month: "short"});
 }
 const clock = t => new Date(t * 1000).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"});
+const clockSecs = t => new Date(t * 1000).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+const weekend = date => [0, 6].includes(new Date(date + "T12:00").getDay());
 function head(p) {
   // Bedrock players have no Java skin, so only Java UUIDs get a face
-  return p && !p.bedrock ? `<img class="head" alt="" loading="lazy" src="https://mc-heads.net/avatar/${p.uuid}/24" onerror="this.style.visibility='hidden'">`
+  return p && !p.bedrock ? `<img class="head" alt="" loading="lazy" src="https://mc-heads.net/avatar/${p.uuid}/28" onerror="this.style.visibility='hidden'">`
     : `<span class="head"></span>`;
 }
 
 let data = null, filter = "all", sortKey = "last_seen", sortAsc = false;
+
+function tickMeta() {
+  if (!data) return;
+  const s = Math.max(0, Math.round(Date.now() / 1000 - data.generated));
+  $("meta").textContent = `Updated ${clockSecs(data.generated)} · ${s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s"} ago`;
+}
 
 function render() {
   const d = data, s = d.server, byName = Object.fromEntries(d.players.map(p => [p.name, p]));
   const st = $("status");
   st.className = "status " + (s.up ? "up" : "down");
   st.lastElementChild.textContent = s.up ? `Online · ${s.version || ""}` : "Offline";
-  $("meta").textContent = "Updated " + clock(d.generated);
+  tickMeta();
 
+  renderRings();
   const total = d.players.reduce((a, p) => a + p.play_ticks, 0);
   const tiles = [
-    ["Players online", s.up ? `${s.online} / ${s.max}` : "–", s.up && s.since ? "up for " + dur(d.generated - s.since) : ""],
-    ["Players this week", d.week.players, d.week.new ? `${d.week.new} new` : "no new players"],
-    ["Hours played this week", d.week.hours, ""],
-    ["Deaths this week", d.week.deaths, ""],
-    ["Advancements this week", d.week.advancements, ""],
-    ["All players", d.players.length, hours(total) + " played in total"],
+    ["group", "blue", "Players this week", d.week.players, d.week.new ? `${d.week.new} new` : "no new players"],
+    ["schedule", "green", "Hours played this week", d.week.hours, ""],
+    ["skull", "red", "Deaths this week", d.week.deaths, ""],
+    ["emoji_events", "yellow", "Advancements this week", d.week.advancements, ""],
+    ["badge", "purple", "All players", d.players.length, hours(total) + " played in total"],
+    ["dns", "teal", "Uptime", s.up && s.since ? dur(d.generated - s.since) : "–", s.up ? "since last restart" : "server offline"],
   ];
-  $("tiles").innerHTML = tiles.map(([l, v, sub]) =>
-    `<div class="card tile"><div class="label">${l}</div><div class="value">${esc(v)}</div><div class="sub">${esc(sub)}</div></div>`).join("");
+  $("tiles").innerHTML = tiles.map(([ic, c, l, v, sub]) =>
+    `<div class="card tile">${icon(ic, c)}<div><div class="value">${esc(v)}</div><div class="label">${l}</div><div class="sub">${esc(sub)}</div></div></div>`).join("");
 
   const online = d.players.filter(p => p.online).sort((a, b) => (a.online_since || 0) - (b.online_since || 0));
   $("online-title").textContent = `Online now (${s.up ? s.online : 0})`;
@@ -575,21 +652,50 @@ function render() {
   renderTable();
 }
 
+// Two concentric rings: outer = players online out of max, inner = hours today against the best day of the last 30
+function renderRings() {
+  const s = data.server, today = data.daily[data.daily.length - 1] || {hours: 0};
+  const best = Math.max(1, ...data.daily.map(d => d.hours));
+  const on = s.up ? s.online : 0, max = s.up ? s.max || 1 : 1;
+  const ring = (r, w, frac, color) => {
+    const c = 2 * Math.PI * r, f = Math.min(1, Math.max(0, frac));
+    return `<circle class="ring-track" cx="90" cy="90" r="${r}" stroke-width="${w}"/>` +
+      (f > 0 ? `<circle class="ring" cx="90" cy="90" r="${r}" stroke-width="${w}" stroke="${color}"
+        stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - f)}" transform="rotate(-90 90 90)"/>` : "");
+  };
+  $("rings").innerHTML = `<svg viewBox="0 0 180 180" role="img" aria-label="${on} players online, ${today.hours.toFixed(1)} hours played today">
+      ${ring(80, 14, on / max, "var(--green-bar)")}${ring(60, 14, today.hours / best, "var(--blue)")}
+      <text class="ring-center" x="90" y="96" text-anchor="middle">${on}</text>
+      <text class="ring-sub" x="90" y="116" text-anchor="middle">online</text></svg>
+    <div class="ring-stats">
+      <div><div class="v" style="color:var(--green)">${s.up ? `${on} / ${s.max}` : "–"}</div><div class="l">Players online</div></div>
+      <div><div class="v" style="color:var(--blue)">${today.hours.toFixed(1)} h</div><div class="l">Played today</div></div>
+    </div>`;
+}
+
 function renderChart() {
-  const svg = $("chart"), days = data.daily, width = svg.clientWidth || 600, height = 190, padL = 34, padB = 22, padT = 8;
+  const svg = $("chart"), days = data.daily, width = svg.clientWidth || 600, height = 230, padL = 34, padB = 22;
+  const bw = (width - padL) / days.length, gap = Math.min(6, bw * 0.3);
+  // Values sit above each bar; on narrow screens they turn sideways to fit
+  const vertical = bw < 24, padT = vertical ? 30 : 18;
+  const fmt = h => h < 10 ? h.toFixed(1) : Math.round(h);
   const max = Math.max(1, ...days.map(d => d.hours));
   const step = max <= 4 ? 1 : max <= 10 ? 2 : max <= 25 ? 5 : 10, yMax = Math.ceil(max / step) * step;
-  const y = v => padT + (height - padT - padB) * (1 - v / yMax), bw = (width - padL) / days.length, gap = Math.min(4, bw * 0.25);
+  const y = v => padT + (height - padT - padB) * (1 - v / yMax);
   let g = '<g class="axis">';
   for (let v = 0; v <= yMax; v += step) g += `<line x1="${padL}" x2="${width}" y1="${y(v)}" y2="${y(v)}"/><text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
   days.forEach((d, i) => { if (i % 5 === (days.length - 1) % 5) {
     const dd = new Date(d.date + "T12:00");
-    g += `<text x="${padL + i * bw + bw / 2}" y="${height - 4}" text-anchor="middle">${dd.toLocaleDateString(undefined, {day: "numeric", month: "short"})}</text>`; } });
+    g += `<text${weekend(d.date) ? ' class="we"' : ""} x="${padL + i * bw + bw / 2}" y="${height - 4}" text-anchor="middle">${dd.toLocaleDateString(undefined, {day: "numeric", month: "short"})}</text>`; } });
   g += "</g>";
   days.forEach((d, i) => {
-    const x = padL + i * bw + gap / 2, w = bw - gap, h = y(0) - y(d.hours), r = Math.min(4, w / 2, h);
-    g += `<rect class="hit" data-i="${i}" x="${padL + i * bw}" y="${padT}" width="${bw}" height="${height - padT - padB}" fill="transparent"/>`;
-    g += d.hours > 0 ? `<path class="bar" data-i="${i}" d="M${x},${y(0)} V${y(d.hours) + r} q0,-${r} ${r},-${r} H${x + w - r} q${r},0 ${r},${r} V${y(0)} Z"/>` : "<g></g>";
+    const x = padL + i * bw + gap / 2, w = bw - gap, h = y(0) - y(d.hours), r = Math.min(6, w / 2, h), cx = x + w / 2;
+    g += `<rect class="hit" data-i="${i}" x="${padL + i * bw}" y="0" width="${bw}" height="${height - padB}" fill="transparent"/>`;
+    if (d.hours <= 0) { g += "<g></g>"; return; }
+    g += `<path class="bar${weekend(d.date) ? " we" : ""}" d="M${x},${y(0)} V${y(d.hours) + r} q0,-${r} ${r},-${r} H${x + w - r} q${r},0 ${r},${r} V${y(0)} Z"/>`;
+    g += vertical
+      ? `<text class="val" transform="translate(${cx + 3.5},${y(d.hours) - 4}) rotate(-90)">${fmt(d.hours)}</text>`
+      : `<text class="val" x="${cx}" y="${y(d.hours) - 5}" text-anchor="middle">${fmt(d.hours)}</text>`;
   });
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = g;
@@ -601,15 +707,16 @@ function renderChart() {
         (d.players.length ? `<br>${d.players.map(esc).join(", ")}` : "<br>nobody played");
       const x = (+el.getAttribute("x") + bw / 2) / width * svg.clientWidth;
       tip.style.left = Math.min(Math.max(x, 90), svg.clientWidth - 90) + "px";
-      tip.style.yMax = (y(d.hours) / height * svg.clientHeight - 6) + "px";
+      tip.style.top = ((y(d.hours) - (vertical ? 28 : 16)) / height * svg.clientHeight) + "px";
       tip.style.display = "block";
     });
     el.addEventListener("mouseleave", () => tip.style.display = "none");
   });
 }
 
-const ICONS = {join: "🟢", leave: "⚪", death: "💀", advancement: "🏆", chat: "💬", server: "🖥️"};
-const KINDS = [["all", "All"], ["players", "Joins & leaves"], ["death", "Deaths"], ["advancement", "Advancements"], ["chat", "Chat"], ["server", "Server"]];
+const ICONS = {join: ["login", "green"], leave: ["logout", "grey"], death: ["skull", "red"], advancement: ["emoji_events", "yellow"],
+  chat: ["chat", "blue"], discord: ["forum", "discord"], server: ["dns", "teal"]};
+const KINDS = [["all", "All"], ["chat", "Chat"], ["players", "Joins & leaves"], ["death", "Deaths"], ["advancement", "Advancements"], ["server", "Server"]];
 function renderFeed(byName) {
   $("filters").innerHTML = KINDS.map(([k, l]) => `<button data-k="${k}" aria-pressed="${k === filter}">${l}</button>`).join("");
   $("filters").querySelectorAll("button").forEach(b => b.onclick = () => { filter = b.dataset.k; renderFeed(byName); });
@@ -618,11 +725,12 @@ function renderFeed(byName) {
   for (const e of data.events.filter(ok).slice(0, 120)) {
     const day = new Date(e.t * 1000).toLocaleDateString(undefined, {weekday: "long", day: "numeric", month: "short"});
     if (day !== lastDay) { html += `<li class="ev-day">${day}</li>`; lastDay = day; }
-    const text = e.type === "chat" ? `<span class="name">${esc(e.name)}</span>: ${esc(e.text)}`
+    const dc = e.type === "chat" && e.src === "discord";
+    const text = e.type === "chat" ? `<span class="name">${esc(e.name)}</span>${dc ? ' <span class="tag dc">Discord</span>' : ""}: ${esc(e.text)}`
       : e.type === "advancement" ? `<span class="name">${esc(e.name)}</span> got <b>${esc(e.text)}</b>`
       : e.type === "server" ? esc(e.text)
       : `<span class="name">${esc(e.name)}</span> ${esc(e.text)}`;
-    html += `<li><span class="ev-icon">${ICONS[e.type]}</span><span class="ev-text">${text}</span><span class="ev-time">${clock(e.t)}</span></li>`;
+    html += `<li>${icon(...ICONS[dc ? "discord" : e.type])}<span class="ev-text">${text}</span><span class="ev-time">${clock(e.t)}</span></li>`;
   }
   $("feed").innerHTML = html || `<li class="empty">Nothing yet.</li>`;
 }
@@ -630,16 +738,16 @@ function renderFeed(byName) {
 function renderMachine() {
   const m = data.machine, s = data.server;
   const rows = [
-    ["Status", s.up ? `Online, up for ${s.since ? dur(data.generated - s.since) : "?"}` : "Offline"],
-    ["Version", s.version || "–"],
-    ["Server memory", m.mem_rss ? bytes(m.mem_rss) + " used (4 GB max)" : "–"],
-    ["Machine RAM", m.ram_total ? `${bytes(m.ram_total - m.ram_free)} of ${bytes(m.ram_total)}` : "–"],
-    ["CPU load", m.load != null ? `${m.load.toFixed(2)} (${m.cpus} cores)` : "–"],
-    ["World size", bytes(m.world_bytes)],
-    ["Disk free", m.disk_free ? `${bytes(m.disk_free)} of ${bytes(m.disk_total)}` : "–"],
-    ["World download refreshed", m.world_zip_time ? ago(m.world_zip_time) : "–"],
+    ["power", "green", "Status", s.up ? `Online, up for ${s.since ? dur(data.generated - s.since) : "?"}` : "Offline"],
+    ["deployed_code", "blue", "Version", s.version || "–"],
+    ["memory", "purple", "Server memory", m.mem_rss ? bytes(m.mem_rss) + " used (4 GB max)" : "–"],
+    ["memory_alt", "purple", "Machine RAM", m.ram_total ? `${bytes(m.ram_total - m.ram_free)} of ${bytes(m.ram_total)}` : "–"],
+    ["speed", "yellow", "CPU load", m.load != null ? `${m.load.toFixed(2)} (${m.cpus} cores)` : "–"],
+    ["public", "teal", "World size", bytes(m.world_bytes)],
+    ["hard_drive", "grey", "Disk free", m.disk_free ? `${bytes(m.disk_free)} of ${bytes(m.disk_total)}` : "–"],
+    ["download", "blue", "World download refreshed", m.world_zip_time ? ago(m.world_zip_time) : "–"],
   ];
-  $("machine").innerHTML = rows.map(([k, v]) => `<li><span style="color:var(--text-2)">${k}</span><span class="right">${esc(v)}</span></li>`).join("");
+  $("machine").innerHTML = rows.map(([ic, c, k, v]) => `<li>${icon(ic, c)}<span style="color:var(--text-2)">${k}</span><span class="right">${esc(v)}</span></li>`).join("");
 }
 
 const COLS = [
@@ -653,7 +761,7 @@ function renderTable() {
     const c = typeof x === "string" ? x.localeCompare(y, undefined, {sensitivity: "base"}) : x - y;
     return sortAsc ? c : -c;
   });
-  $("pcount").textContent = "· " + ps.length;
+  $("pcount").textContent = ps.length;
   const tr = $("players").tHead.rows[0];
   tr.innerHTML = COLS.map(([k, l]) => `<th data-k="${k}"${k === sortKey ? ` aria-sort="${sortAsc ? "ascending" : "descending"}"` : ""}>${l}</th>`).join("");
   tr.querySelectorAll("th").forEach(th => th.onclick = () => {
@@ -684,6 +792,7 @@ async function load() {
 }
 load();
 setInterval(load, 15000);
+setInterval(tickMeta, 1000);
 let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => data && renderChart(), 150); });
 </script>
 </body>

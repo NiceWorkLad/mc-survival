@@ -75,8 +75,10 @@ Caddy (`caddy/Caddyfile`, deployed to `/etc/caddy/` by `mc-deploy`) owns the pub
 
 `scripts/mc-dashboard` (run by `mc-dashboard.service`) serves a stats page at http://192.168.0.253:8200:
 who's online, recent players, every player's stats (play time, deaths, distance, ...), hours played per
-day, an activity feed (joins, deaths, advancements, chat, restarts) and machine stats. It reads the
-server's own logs and player files plus a status ping, so no plugin or RCON is involved. It refuses
+day, an activity feed (joins, deaths, advancements, in-game and Discord chat, restarts) and machine stats. It reads the
+server's own logs and player files plus a status ping, so no plugin or RCON is involved. Discord chat reaches the log
+through EssentialsDiscord's `relay-to-console` (the `primary` channel, in the `discord-to-mc` format, which the
+dashboard expects to be `{nickname}: {message}`); messages from before that was enabled aren't in the log. It refuses
 non-private client addresses, and ufw only opens 8200 to the LAN; don't forward it on the router.
 `mc-deploy` restarts it when it changes. Check its data with `sudo -u minecraft mc-dashboard --dump`.
 

@@ -70,8 +70,9 @@ chat:
   show-all-chat: false
   # A list of Discord channels which should be logged to console.
   # If you want to use the channels below, remember to uncomment the line by removing the '#' before the '-'.
+  # primary is logged so the dashboard (scripts/mc-dashboard) can show Discord chat.
   relay-to-console:
-    #- primary
+    - primary
     #- chat
 
 # Console relay settings
