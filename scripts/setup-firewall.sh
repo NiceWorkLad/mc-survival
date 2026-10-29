@@ -11,7 +11,9 @@ ufw default allow outgoing
 
 ufw allow from "$LAN" to any port 22 proto tcp comment 'SSH, home network only'
 ufw allow 25565/tcp comment 'Minecraft Java'
-ufw allow 19132/udp comment 'Minecraft Bedrock (Geyser)'
+ufw allow 19132/udp comment 'Minecraft Bedrock (Geyser RakNet)'
+ufw allow 19132/tcp comment 'Minecraft Bedrock (Geyser NetherNet signaling)'
+ufw allow 19133/udp comment 'Minecraft Bedrock (Geyser NetherNet gameplay)'
 ufw allow 8100/tcp  comment 'BlueMap web map'
 ufw allow from "$LAN" to any port 8200 proto tcp comment 'Dashboard, home network only'
 

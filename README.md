@@ -63,6 +63,48 @@ Restore a snapshot (PC example):
   placeholders) so you can `git diff` what changed on the server, e.g. plugins rewriting their configs
   or edits made in game. Nothing is committed automatically.
 
+## Bedrock (Geyser + Floodgate, NetherNet)
+
+Since Bedrock 26.60 (27 Oct 2026) clients only connect over **NetherNet**, not RakNet. Geyser runs with
+`transport: both` so older Bedrock clients still get in too:
+
+| Port | Protocol | What |
+|---|---|---|
+| 19132 | UDP | RakNet (older Bedrock clients) |
+| 19132 | TCP | NetherNet built-in signaling |
+| 19133 | UDP | NetherNet gameplay (`webrtc-port`) |
+
+All three need opening in ufw **and** forwarding on the router to 192.168.0.253.
+Geyser 2.12.x connects to the server as a Java 26.3 client, so on Paper 26.2 **ViaVersion** is required.
+Geyser keeps its NetherNet identity in `plugins/Geyser-Spigot/nethernet/identity.pem` (in backups, not git):
+if it's lost, every Bedrock player has to accept the "trust this server" prompt again.
+Once nobody joins over RakNet any more, set `transport: nethernet` and `webrtc-port: 0`, and drop 19133.
+
+### Switch-over runbook (one-off)
+
+1. Download the latest Geyser-Spigot (2.12.1 build 1273 or newer) and Floodgate-Spigot from
+   https://geysermc.org/download, and ViaVersion from https://modrinth.com/plugin/viaversion.
+2. On the server, swap the jars and record their checksums in `plugins.txt`:
+
+       cd /opt/minecraft/survival/plugins
+       sudo mkdir -p ../old-jars && sudo mv Geyser-Spigot.jar floodgate-spigot.jar ../old-jars/
+       sudo install -o minecraft -g minecraft -m 644 ~/Geyser-Spigot.jar ~/floodgate-spigot.jar ~/ViaVersion-*.jar .
+       sha256sum Geyser-Spigot.jar floodgate-spigot.jar ViaVersion-*.jar
+
+3. Firewall (adds the two new rules without resetting the rest):
+
+       sudo ufw allow 19132/tcp comment 'Minecraft Bedrock (Geyser NetherNet signaling)'
+       sudo ufw allow 19133/udp comment 'Minecraft Bedrock (Geyser NetherNet gameplay)'
+
+4. Router: forward 19132 TCP+UDP and 19133 UDP to 192.168.0.253.
+5. Merge this branch, then `sudo mc-deploy` and let it restart (a full restart, not `geyser reload`).
+6. Check the log: `journalctl -u minecraft-survival -n 200 | grep -iE "geyser|signaling|nethernet|viaversion"`.
+   You want "Built-in signaling started" and no "NetherNet support is NOT enabled". In the console,
+   `geyser nethernet advertised` should show the house's public IP.
+7. Join from an updated Bedrock device on mobile data (not the home Wi-Fi), then from a Java client.
+
+Rollback: move the jars in `old-jars/` back, `git revert` the config commit, `sudo mc-deploy`.
+
 ## Web: map + world download (port 8100)
 
 Caddy (`caddy/Caddyfile`, deployed to `/etc/caddy/` by `mc-deploy`) owns the public port 8100:
