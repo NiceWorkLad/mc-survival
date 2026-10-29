@@ -18,7 +18,7 @@ Server lives in `/opt/minecraft/survival`, runs as the `minecraft` user under sy
 
 - **Secrets**: RCON password, management secret, Floodgate `key.pem`. `server.properties` uses `${VAR}` placeholders.
 - **Jars**: pinned by version + sha256 in `plugins.txt`.
-- **Runtime data**: worlds, player data, claims, WorldGuard regions, CoreProtect/LuckPerms databases,
+- **Runtime data**: worlds, player data, claims, WorldGuard regions, CoreProtect/LuckPerms databases, mcMMO skill levels,
   whitelist/ops/bans (changed in-game). These belong in backups.
 
 ## Changing config

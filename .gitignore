@@ -32,3 +32,6 @@ plugins/TAB/skincache.yml
 plugins/TAB/users.yml
 plugins/Essentials/items.json
 plugins/Essentials/upgrades-done.yml
+plugins/mcMMO/flatfile/
+plugins/mcMMO/backup/
+plugins/mcMMO/defaults/
