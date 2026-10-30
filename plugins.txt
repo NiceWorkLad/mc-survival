@@ -8,15 +8,15 @@ CoreProtect    | CE-24.1               | CoreProtect-CE-24.1.jar            | a2
 EssentialsX    | 2.22.0                | EssentialsX-2.22.0.jar             | bda4685105977fca2e209820a9f0ad24275bd103390a03236f38e59bfdac58e6 | https://essentialsx.net/downloads.html
 EssentialsXSpawn | 2.22.0              | EssentialsXSpawn-2.22.0.jar        | dd5377c4c921b9b67814209f4f6646ffbb959729003e721ec5e63c47c7c010b8 | https://essentialsx.net/downloads.html
 EssentialsXDiscord | 2.22.0             | EssentialsXDiscord-2.22.0.jar      | d7bd00c2f67f2132a3ac88b9477f9dfb1edd9ced25c9e3ba583dc882c68ce8e0 | https://essentialsx.net/downloads.html
-Floodgate      | latest (update with Geyser) | floodgate-spigot.jar      | TODO-sha256 after download | https://geysermc.org/download
+Floodgate      | 2.2.5-SNAPSHOT b141   | floodgate-spigot.jar               | 21570aff9ce17d6983928e8552777760e1ede5050026b04c686b0ae112e6fd7e | https://geysermc.org/download
 FreedomChat    | 1.7.9                 | FreedomChat-Paper-1.7.9.jar        | 878df27b1e8f701a3161373fee602fe5b11e3fd213bda4aa6c8cf8a3778c6d27 | https://modrinth.com/plugin/freedomchat
-Geyser         | 2.12.1 b1273+ (NetherNet, Bedrock 26.60) | Geyser-Spigot.jar | TODO-sha256 after download | https://geysermc.org/download
+Geyser         | 2.12.1 b1273+ (NetherNet, Bedrock 26.60) | Geyser-Spigot.jar | 4e7cb3add6c59330c1ce5061ac744deff381280d20a96f6e3880c9a04c480906 | https://geysermc.org/download
 GriefPrevention | 16.18.7              | GriefPrevention.jar                | 45e9907c61222e559ed2e099ffee0ede706a21243a31d7db549baf678708fdf0 | https://modrinth.com/plugin/griefprevention
 LuckPerms      | 5.5.71                | LuckPerms-Bukkit-5.5.71.jar        | 49cecb66fa1fd22a133039a490e9c1e5095a238e7cd66eb9d2a16fe6c897550d | https://luckperms.net/download
 mcMMO          | 2.3.002 (built from source) | mcMMO-2.3.002.jar          | d89d9f731214d1ff02127f973b11943e6b9cdba950718ac9410c30ef7acbc19b | https://github.com/mcMMO-Dev/mcMMO (commit 25474dc0e, built with JDK 21: mvn -DskipTests package)
 MiniMOTD       | 2.2.5                 | minimotd-paper-2.2.5.jar           | a1f5bff3abf4c9c90bd4417ce26612e621c83a1564f3fc7aa39848996cbea6c6 | https://modrinth.com/plugin/minimotd
 TAB            | 6.2.0                 | TAB%20v6.2.0.jar                   | f94331947134242efa478b9b9bf04b29e37861721dee58c32b7ea57779aa735e | https://modrinth.com/plugin/tab-was-taken
-ViaVersion     | latest (supports 26.3) | ViaVersion-<version>.jar  | TODO-sha256 after download | https://modrinth.com/plugin/viaversion
+ViaVersion     | 5.12.3-SNAPSHOT       | ViaVersion-5.12.3-SNAPSHOT.jar     | 4676e6db0202d2ad0921b46da464885c496ef7274aaa265402b70d41631c96c0 | https://modrinth.com/plugin/viaversion
 Vault          | 1.7.3-b131            | Vault.jar                          | a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d | https://github.com/MilkBowl/Vault/releases
 WorldEdit      | 7.4.6-beta-02         | worldedit-bukkit-7.4.6-beta-02.jar | 166365c44bad4cd916200b288cf391d3770e3197d1eca84ff74f3914d933e289 | https://modrinth.com/plugin/worldedit
 WorldGuard     | 7.0.19                | worldguard-bukkit-7.0.19.jar       | 396df065f1cf38bab9878a0f53a776d5a085ebbf3c41813938b73f95d4eaca03 | https://modrinth.com/plugin/worldguard
