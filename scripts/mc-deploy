@@ -70,12 +70,13 @@ export MASK_SETTINGS="$(grep -rhoE '^[A-Za-z0-9_.-]+[=:] *\$\{[A-Z_]+\}' "$REPO/
 
 # --- 3. Render repo files into a staging dir with secrets substituted
 STAGE=$(mktemp -d); trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/live/plugins" "$STAGE/systemd" "$STAGE/bin" "$STAGE/caddy"
+mkdir -p "$STAGE/live/plugins" "$STAGE/systemd" "$STAGE/bin" "$STAGE/caddy" "$STAGE/sudoers"
 cp -r "$REPO/server/." "$STAGE/live/"
 cp -r "$REPO/plugins/." "$STAGE/live/plugins/"
 cp -r "$REPO/systemd/." "$STAGE/systemd/"
 for f in "$REPO"/scripts/mc-*; do cp "$f" "$STAGE/bin/"; done
 [ -d "$REPO/caddy" ] && cp -r "$REPO/caddy/." "$STAGE/caddy/"
+[ -d "$REPO/sudoers" ] && cp -r "$REPO/sudoers/." "$STAGE/sudoers/"
 { grep -rlE '\$\{[A-Z_]+\}' "$STAGE" || true; } | xargs -r perl -pi -e 's/\$\{([A-Z_]+)\}/exists $ENV{$1} ? $ENV{$1} : $&/ge'
 if left=$(grep -rnoE '\$\{[A-Z_]+\}' "$STAGE"); then
   echo "Unfilled placeholders (add them to $SECRETS):"; echo "$left" | sed "s|$STAGE/||"; exit 1
@@ -94,8 +95,9 @@ compare "$STAGE/live" "$LIVE" live
 compare "$STAGE/systemd" /etc/systemd/system systemd
 compare "$STAGE/bin" /usr/local/bin bin
 compare "$STAGE/caddy" /etc/caddy caddy
+compare "$STAGE/sudoers" /etc/sudoers.d sudoers
 
-dest() { case "$1" in live) echo "$LIVE";; systemd) echo /etc/systemd/system;; bin) echo /usr/local/bin;; caddy) echo /etc/caddy;; esac; }
+dest() { case "$1" in live) echo "$LIVE";; systemd) echo /etc/systemd/system;; bin) echo /usr/local/bin;; caddy) echo /etc/caddy;; sudoers) echo /etc/sudoers.d;; esac; }
 
 if [ ${#changed[@]} -eq 0 ]; then bold "Server already matches the repo."; exit 0; fi
 
@@ -110,6 +112,12 @@ for c in "${changed[@]}"; do
   fi
 done
 echo
+
+# A broken sudoers file can lock out sudo entirely: refuse to deploy one visudo rejects
+for c in "${changed[@]}"; do
+  [[ "$c" == sudoers\|* ]] || continue
+  visudo -cqf "$STAGE/sudoers/${c#*|}" || { echo "sudoers/${c#*|} is invalid (visudo -cf), nothing applied"; exit 1; }
+done
 
 if [ "$CHECK" -eq 1 ]; then exit 1; fi
 ask "Apply these changes?" || { echo "Nothing changed."; exit 0; }
@@ -129,6 +137,8 @@ for c in "${changed[@]}"; do
       install -m 755 "$STAGE/bin/$rel" "$d/$rel"; bluemap_only=0 ;;
     caddy)
       install -D -m 644 "$STAGE/caddy/$rel" "$d/$rel"; need_caddy=1; bluemap_only=0 ;;
+    sudoers)
+      install -o root -g root -m 440 "$STAGE/sudoers/$rel" "$d/$rel"; bluemap_only=0 ;;
   esac
   echo "updated $d/$rel"
 done
@@ -136,6 +146,9 @@ done
 # The dashboard holds no state, so pick up a new version of it straight away
 if printf '%s\n' "${changed[@]}" | grep -qE '^(bin\|mc-dashboard|systemd\|mc-dashboard\.service)$'; then
   systemctl try-restart mc-dashboard && echo "dashboard restarted"
+fi
+if printf '%s\n' "${changed[@]}" | grep -qx 'systemd|mc-dashboard-web.service'; then
+  systemctl try-restart mc-dashboard-web && echo "dashboard (Rails) restarted"
 fi
 
 # Caddy fronts BlueMap on the public port. If the port is still held (e.g. BlueMap is

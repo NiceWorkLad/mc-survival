@@ -6,6 +6,8 @@ set -euo pipefail
 
 SRC=/opt/minecraft/survival
 STAGE=/var/lib/mc-backup/stage
+DASH_DB=/var/lib/mc-dashboard
+DASH_STAGE=/var/lib/mc-dashboard/backup
 FIFO=/run/minecraft-survival.stdin
 export RESTIC_REPOSITORY=/var/backups/minecraft/restic
 export RESTIC_PASSWORD_FILE=/etc/mc-backup/restic-password
@@ -43,8 +45,23 @@ sqlite3 "$SRC/plugins/CoreProtect/database.db" ".backup '$STAGE/plugins/CoreProt
 send "save-on"
 paused=0
 
-restic backup "$STAGE" --tag nightly --host game-server --quiet
-restic forget --tag nightly --host game-server \
+# Dashboard databases (WAL): consistent copies made as mcdash, so root never creates
+# -wal/-shm files the app then can't open. A failure here must not stop the world backup.
+paths=("$STAGE")
+if id mcdash >/dev/null 2>&1 && [ -d "$DASH_DB" ]; then
+  install -d -o mcdash -g mcdash -m 700 "$DASH_STAGE"
+  for db in "$DASH_DB"/*.sqlite3; do
+    [ -e "$db" ] || continue
+    runuser -u mcdash -- sqlite3 "$db" ".backup '$DASH_STAGE/$(basename "$db")'" \
+      || echo "WARNING: dashboard database $db not backed up"
+  done
+  paths+=("$DASH_STAGE")
+fi
+
+restic backup "${paths[@]}" --tag nightly --host game-server --quiet
+# Group by host+tags, not the default host+paths: the path list grew when the dashboard
+# databases were added, and the older snapshots must stay under the same retention.
+restic forget --tag nightly --host game-server --group-by host,tags \
   --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune --quiet
 
 # Spot-check 5% of stored data each Sunday
