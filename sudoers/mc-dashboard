@@ -1,0 +1,5 @@
+# Installed to /etc/sudoers.d/mc-dashboard by mc-deploy (checked with visudo first).
+# The dashboard (user mcdash) may run mc-ctl as root and nothing else. mc-ctl validates
+# its own arguments; see scripts/mc-ctl.
+Defaults:mcdash !lecture, env_reset
+mcdash ALL=(root) NOPASSWD: /usr/local/bin/mc-ctl

@@ -1,0 +1,258 @@
+#!/usr/bin/python3 -I
+"""Privileged helper for the dashboard (mc-dashboard-web, user mcdash).
+
+The dashboard never runs as root and never runs anything else as root: every privileged
+action is a fixed subcommand here, allowed by /etc/sudoers.d/mc-dashboard. Arguments are
+validated strictly, and nothing from the caller reaches a shell.
+
+  sudo mc-ctl status [--json]     service state of the survival server
+  sudo mc-ctl metrics [--json]    process, JVM (jstat), GC and host numbers
+
+Exit codes: 0 ok, 1 refused (or failed), 2 usage error.
+Byte values are bytes; times are Unix seconds or seconds of CPU/GC time. CPU and GC
+figures are running totals: the dashboard turns them into rates from two samples.
+"""
+import argparse, datetime as dt, json, os, re, shutil, subprocess, sys, time
+
+LIVE = "/opt/minecraft/survival"
+WORLD = f"{LIVE}/world"
+RESTIC_REPO = "/var/backups/minecraft/restic"
+SERVICE = "minecraft-survival.service"
+SERVER_USER = "minecraft"
+CACHE = "/run/mc-ctl"
+PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+SIZE_TTL = 900  # seconds a du result is reused; walking the world every minute is wasteful
+
+OK, REFUSED, USAGE = 0, 1, 2
+
+
+class Refused(Exception):
+    pass
+
+
+def run(cmd, timeout=10):
+    """Run a fixed argv (never a shell). Returns stdout, or None if it failed."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env={"PATH": PATH, "LC_ALL": "C", "TZ": "UTC"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def read(path):
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+# --- status ------------------------------------------------------------------
+
+def service_state(unit):
+    keys = ["ActiveState", "SubState", "Result", "MainPID", "NRestarts", "ActiveEnterTimestamp", "ExecMainStatus"]
+    out = run(["systemctl", "show", unit, "-p", ",".join(keys)])
+    if out is None:
+        return None
+    p = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    # "Mon 2026-10-26 23:23:46 UTC" (run() sets TZ=UTC; --timestamp=unix needs systemd 251+)
+    try:
+        since = int(dt.datetime.strptime(p.get("ActiveEnterTimestamp", ""), "%a %Y-%m-%d %H:%M:%S UTC")
+                    .replace(tzinfo=dt.timezone.utc).timestamp())
+    except ValueError:
+        since = None
+    return {
+        "active_state": p.get("ActiveState"),
+        "sub_state": p.get("SubState"),
+        "result": p.get("Result"),
+        "main_pid": int(p["MainPID"]) if p.get("MainPID", "0").isdigit() and p["MainPID"] != "0" else None,
+        "restarts": int(p["NRestarts"]) if p.get("NRestarts", "").isdigit() else None,
+        "active_since": since,
+        "last_exit_status": int(p["ExecMainStatus"]) if p.get("ExecMainStatus", "").isdigit() else None,
+    }
+
+
+def cmd_status(args):
+    return {"taken_at": round(time.time(), 3), "server": service_state(SERVICE)}
+
+
+# --- metrics -----------------------------------------------------------------
+
+def proc_stats(pid):
+    """RSS, threads and CPU seconds of one process, from /proc."""
+    status, stat = read(f"/proc/{pid}/status"), read(f"/proc/{pid}/stat")
+    if status is None or stat is None:
+        return None
+    tick = os.sysconf("SC_CLK_TCK")
+    # comm (field 2) may contain spaces; the fields we want come after its closing ")"
+    f = stat[stat.rindex(")") + 2:].split()
+    rss = re.search(r"^VmRSS:\s+(\d+) kB", status, re.M)
+    thr = re.search(r"^Threads:\s+(\d+)", status, re.M)
+    return {
+        "pid": pid,
+        "rss": int(rss[1]) * 1024 if rss else None,
+        "threads": int(thr[1]) if thr else None,
+        "cpu_seconds": (int(f[11]) + int(f[12])) / tick,  # utime + stime
+        "max_heap": max_heap(pid),
+    }
+
+
+def max_heap(pid):
+    """-Xmx from the java command line (the unit always sets it)."""
+    cmdline = read(f"/proc/{pid}/cmdline") or ""
+    m = None
+    for arg in cmdline.split("\0"):
+        m = re.fullmatch(r"-Xmx(\d+)([kKmMgG]?)", arg) or m
+    if not m:
+        return None
+    return int(m[1]) * {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30}[m[2].lower()]
+
+
+def parse_jstat(text):
+    """`jstat -gc` output (header line + value line, sizes in KB) -> heap/GC numbers.
+    Columns differ between collectors and JDKs, so they are looked up by name."""
+    lines = [l.split() for l in text.strip().splitlines()]
+    if len(lines) < 2 or len(lines[0]) != len(lines[-1]):
+        return None
+    v = {}
+    for k, x in zip(lines[0], lines[-1]):
+        try:
+            v[k] = float(x)
+        except ValueError:
+            v[k] = None  # "-" for columns the collector doesn't have
+    kb = lambda *ks: int(sum(v.get(k) or 0 for k in ks) * 1024)
+    count = lambda k: int(v[k]) if v.get(k) is not None else None
+    return {
+        "heap_used": kb("S0U", "S1U", "EU", "OU"),
+        "heap_committed": kb("S0C", "S1C", "EC", "OC"),
+        "eden_used": kb("EU"), "eden_committed": kb("EC"),
+        "survivor_used": kb("S0U", "S1U"),
+        "old_used": kb("OU"), "old_committed": kb("OC"),
+        "metaspace_used": kb("MU"), "metaspace_committed": kb("MC"),
+        "gc_young_count": count("YGC"), "gc_young_seconds": v.get("YGCT"),
+        "gc_full_count": count("FGC"), "gc_full_seconds": v.get("FGCT"),
+        # G1/ZGC concurrent cycles (remark + cleanup pauses), absent on older JDKs
+        "gc_concurrent_count": count("CGC"), "gc_concurrent_seconds": v.get("CGCT"),
+        "gc_total_seconds": v.get("GCT"),
+    }
+
+
+def jvm_stats(pid):
+    # jstat reads /tmp/hsperfdata_minecraft, which only the JVM's own user may open.
+    # It doesn't attach to the JVM or pause anything.
+    out = run(["runuser", "-u", SERVER_USER, "--", "jstat", "-gc", str(pid)])
+    if out is None:
+        reason = "jstat failed" if shutil.which("jstat", path=PATH) else "jstat not installed (needs a JDK, not just a JRE)"
+        return {"error": reason}
+    return parse_jstat(out) or {"error": "unexpected jstat output"}
+
+
+def system_cpu():
+    """Running totals of CPU time for the whole machine, in seconds."""
+    fields = [int(x) for x in read("/proc/stat").splitlines()[0].split()[1:]]
+    tick = os.sysconf("SC_CLK_TCK")
+    idle = fields[3] + (fields[4] if len(fields) > 4 else 0)  # idle + iowait
+    total = sum(fields[:8])  # guest time is already counted in user
+    return {"busy_seconds": (total - idle) / tick, "total_seconds": total / tick, "cpus": os.cpu_count()}
+
+
+def du_cached(name, path):
+    """Size of a directory tree, cached for SIZE_TTL seconds under /run/mc-ctl."""
+    cache = f"{CACHE}/size-{name}.json"
+    try:
+        with open(cache) as fh:
+            c = json.load(fh)
+        if time.time() - c["at"] < SIZE_TTL:
+            return c["bytes"]
+    except (OSError, ValueError, KeyError):
+        pass
+    out = run(["du", "-sb", path], timeout=120)
+    size = int(out.split()[0]) if out else None
+    if size is not None:
+        os.makedirs(CACHE, mode=0o700, exist_ok=True)
+        tmp = f"{cache}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"at": time.time(), "bytes": size}, fh)
+        os.replace(tmp, cache)
+    return size
+
+
+def host_stats():
+    mi = {k: int(v.split()[0]) * 1024 for k, v in (l.split(":", 1) for l in read("/proc/meminfo").splitlines())}
+    st = os.statvfs(LIVE)
+    load = read("/proc/loadavg").split()
+    return {
+        "load": [float(x) for x in load[:3]],
+        "cpu": system_cpu(),
+        "ram_total": mi["MemTotal"], "ram_available": mi["MemAvailable"],
+        "ram_used": mi["MemTotal"] - mi["MemAvailable"],
+        "swap_total": mi["SwapTotal"], "swap_used": mi["SwapTotal"] - mi["SwapFree"],
+        "disk_total": st.f_blocks * st.f_frsize,
+        "disk_free": st.f_bavail * st.f_frsize,
+        "disk_used": (st.f_blocks - st.f_bfree) * st.f_frsize,
+        "world_size": du_cached("world", WORLD),
+        "restic_repo_size": du_cached("restic", RESTIC_REPO),
+    }
+
+
+def cmd_metrics(args):
+    svc = service_state(SERVICE)
+    pid = svc and svc["main_pid"]
+    proc = proc_stats(pid) if pid else None
+    return {
+        "taken_at": round(time.time(), 3),
+        "server": svc,
+        "process": proc,
+        "jvm": jvm_stats(pid) if proc else None,
+        "host": host_stats(),
+    }
+
+
+# --- CLI ---------------------------------------------------------------------
+
+def flatten(d, prefix=""):
+    for k, v in d.items():
+        if isinstance(v, dict):
+            yield from flatten(v, f"{prefix}{k}.")
+        else:
+            yield f"{prefix}{k}", v
+
+
+COMMANDS = {
+    "status": (cmd_status, "service state of the survival server"),
+    "metrics": (cmd_metrics, "process, JVM, GC and host numbers"),
+}
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"mc-ctl: {message}", file=sys.stderr)
+        sys.exit(USAGE)
+
+
+def main():
+    p = Parser(prog="mc-ctl", allow_abbrev=False, description=__doc__.split("\n\n")[0])
+    sub = p.add_subparsers(dest="command", required=True, parser_class=Parser)
+    for name, (_, help_) in COMMANDS.items():
+        sp = sub.add_parser(name, help=help_, allow_abbrev=False)
+        sp.add_argument("--json", action="store_true", help="print JSON")
+    args = p.parse_args()
+
+    try:
+        if os.geteuid() != 0:
+            raise Refused("run with sudo")
+        result = COMMANDS[args.command][0](args)
+    except Refused as e:
+        print(json.dumps({"ok": False, "error": str(e)}) if args.json else f"mc-ctl: {e}")
+        return REFUSED
+    if args.json:
+        print(json.dumps(result))
+    else:
+        for k, v in flatten(result):
+            print(f"{k}: {v}")
+    return OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -35,5 +35,5 @@ fi
 
 "$RESTIC" copy --from-repo "$FROM" --from-password-file "$RESTIC_PASSWORD_FILE" \
   -o sftp.command="$SFTP_CMD"
-"$RESTIC" forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+"$RESTIC" forget --group-by host,tags --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
 "$RESTIC" snapshots --latest 1 --compact

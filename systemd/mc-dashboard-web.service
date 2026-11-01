@@ -1,0 +1,26 @@
+[Unit]
+Description=Minecraft dashboard, Rails app (home network, port 8210)
+After=network-online.target minecraft-survival.service
+Wants=network-online.target
+# Nothing to run until the app is deployed to /opt/mc-dashboard (NiceWorkLad/mc-dashboard)
+ConditionPathExists=/opt/mc-dashboard/bin/thrust
+
+[Service]
+User=mcdash
+Group=mcdash
+WorkingDirectory=/opt/mc-dashboard
+EnvironmentFile=/opt/mc-dashboard/.env
+Environment=RAILS_ENV=production SOLID_QUEUE_IN_PUMA=1
+# Thruster listens on 8210 (ufw: LAN only) and proxies to Puma, which must bind 127.0.0.1:3010
+Environment=HTTP_PORT=8210 TARGET_PORT=3010 PORT=3010
+ExecStart=/opt/mc-dashboard/bin/thrust /opt/mc-dashboard/bin/rails server
+Restart=on-failure
+RestartSec=10
+UMask=0027
+# No NoNewPrivileges/ProtectSystem/PrivateTmp here, on purpose: privileged actions go through
+# "sudo mc-ctl", which inherits this unit's sandbox. NoNewPrivileges would block sudo outright,
+# ProtectSystem would leave mc-ctl unable to write, and PrivateTmp would hide the JVM's
+# /tmp/hsperfdata_minecraft from jstat. The limits come from the mcdash user, its ACLs and sudoers.
+
+[Install]
+WantedBy=multi-user.target

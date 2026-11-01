@@ -11,7 +11,8 @@ Server lives in `/opt/minecraft/survival`, runs as the `minecraft` user under sy
 | `plugins/<Name>/` | `/opt/minecraft/survival/plugins/<Name>/` (config files only) |
 | `plugins.txt` | Pinned server + plugin jars (versions, checksums, download pages) |
 | `systemd/` | `/etc/systemd/system/` |
-| `scripts/` | `/usr/local/bin/` |
+| `scripts/` | `/usr/local/bin/` (the `mc-*` ones) |
+| `sudoers/` | `/etc/sudoers.d/` (mode 440, checked with `visudo` first) |
 | `secrets.env.example` | Template for `/opt/minecraft/secrets.env` (never committed) |
 
 ## What is deliberately *not* here
@@ -27,7 +28,7 @@ Server lives in `/opt/minecraft/survival`, runs as the `minecraft` user under sy
 2. On the server: `sudo mc-deploy`. It pulls the repo into `~/mc-survival` (read-only deploy key),
    fills `${VAR}` placeholders from `/opt/minecraft/secrets.env`, shows a diff, asks, then installs:
    `server/` and `plugins/` into the server dir, `systemd/` into `/etc/systemd/system`, `scripts/mc-*`
-   into `/usr/local/bin`. It never deletes files on the server.
+   into `/usr/local/bin`, `sudoers/` into `/etc/sudoers.d`. It never deletes files on the server.
 3. If a restart is needed it says so, checks who's online, and warns players in chat 60s before.
    BlueMap-only changes just need `/bluemap reload` in game.
 
@@ -42,6 +43,8 @@ when re-syncing from the live server.
 - **Server** (`scripts/mc-backup`, nightly 04:30): pauses saving only while the world and a
   consistent `sqlite3 .backup` of CoreProtect are copied to `/var/lib/mc-backup/stage`, then
   backs that up with restic to `/var/backups/minecraft/restic` (7 daily / 4 weekly / 6 monthly).
+  The Rails dashboard's databases (`/var/lib/mc-dashboard/*.sqlite3`) are copied the same way into
+  `/var/lib/mc-dashboard/backup` and go into the same snapshot.
 - **PC** (`pc/mc-backup-pull`, WSL): `restic copy` pulls new snapshots over SSH into
   `E:\MinecraftBackups\restic` (14 daily / 8 weekly / 12 monthly). Log: `~/.config/mc-backup/pull.log`.
 - PC schedule: systemd user timer `pc/systemd/mc-backup-pull.timer` (every 3h while WSL runs, symlinked into `~/.config/systemd/user/`).
@@ -129,6 +132,36 @@ One-time setup on the server:
     sudo mc-deploy
     sudo systemctl enable --now mc-dashboard
     sudo ufw allow from 192.168.0.0/24 to any port 8200 proto tcp comment 'Dashboard, home network only'
+
+## Dashboard, Rails (port 8210, home network only)
+
+The replacement for `mc-dashboard` lives in its own repo, NiceWorkLad/mc-dashboard, deployed to `/opt/mc-dashboard`
+and run as the unprivileged user `mcdash` by `mc-dashboard-web.service`. Its databases are in `/var/lib/mc-dashboard`
+and its secrets in `/opt/mc-dashboard/.env` (mode 600). This repo holds the server side:
+
+- **`mc-ctl`**: the only thing the app may run as root (`sudoers/mc-dashboard`). Fixed subcommands with
+  strictly checked arguments; exit 0 ok, 1 refused, 2 usage error. `sudo mc-ctl status|metrics [--json]`.
+  `metrics` reads `/proc`, disk usage and `jstat -gc` (as `minecraft`; needs a JDK, not only a JRE).
+- **File access**: `scripts/setup-dashboard.sh` gives `mcdash` read-only ACLs on `logs/`, `world/players/`,
+  `usercache.json`, `plugins/Essentials/userdata/`, `plugins/mcMMO/flatfile/` and
+  `plugins/GriefPreventionData/ClaimData/`, and an explicit no-access ACL on everything else in the server
+  dir, so world-readable files like `server.properties` stay closed to it. Default ACLs carry this over to new files.
+  restic and rsync don't restore ACLs, so re-run the script after restoring files from a backup.
+- **RCON** (25575) and the **management server** (25585, `localhost`, no TLS) are on for the app.
+  RCON listens on every interface (Minecraft has no setting for its address); ufw keeps both closed, so never
+  add a rule for either. `broadcast-rcon-to-ops=false` stops ops seeing the app's commands every minute.
+
+One-time setup on the server:
+
+    sudo bash scripts/setup-dashboard.sh          # user, dirs, .env, ACLs, ufw 8210
+    sudo mc-deploy                                # mc-ctl, sudoers, unit, RCON + management (restart)
+    sudo bash scripts/setup-dashboard.sh --check  # access checks, should end "All checks passed."
+
+Then, from another machine on the LAN, both of these must fail to connect:
+
+    nc -zv -w3 192.168.0.253 25575; nc -zv -w3 192.168.0.253 25585
+
+The service isn't enabled until the app is deployed (it won't start without `/opt/mc-dashboard/bin/thrust`).
 
 ## Discord
 

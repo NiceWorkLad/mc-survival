@@ -16,6 +16,8 @@ ufw allow 19132/tcp comment 'Minecraft Bedrock (Geyser NetherNet signaling)'
 ufw allow 19133/udp comment 'Minecraft Bedrock (Geyser NetherNet gameplay)'
 ufw allow 8100/tcp  comment 'BlueMap web map'
 ufw allow from "$LAN" to any port 8200 proto tcp comment 'Dashboard, home network only'
+ufw allow from "$LAN" to any port 8210 proto tcp comment 'Dashboard (Rails), home network only'
+# Not opened, on purpose: RCON 25575 (listens on all interfaces) and the management server 25585 (localhost)
 
 rm -f /tmp/ufw-ok
 systemd-run --quiet --unit=ufw-rollback --on-active=180 \
