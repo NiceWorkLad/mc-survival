@@ -20,5 +20,6 @@ group default: essentials.tpaccept = true
 group default: essentials.tpdeny = true
 
 ## Players
+player niceworklad: essentials.keepinv = false
 player niceworklad: group.admin = true
 player niceworklad: group.default = true
